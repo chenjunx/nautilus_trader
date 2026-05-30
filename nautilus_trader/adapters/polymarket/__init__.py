@@ -33,6 +33,8 @@ from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_MIN_
 from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_VENUE
 from nautilus_trader.adapters.polymarket.common.parsing import parse_polymarket_instrument
 from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_instrument_id
+from nautilus_trader.adapters.polymarket.collector import PolymarketParquetCollector
+from nautilus_trader.adapters.polymarket.collector import PolymarketParquetCollectorConfig
 from nautilus_trader.adapters.polymarket.config import PolymarketDataClientConfig
 from nautilus_trader.adapters.polymarket.config import PolymarketExecClientConfig
 from nautilus_trader.adapters.polymarket.factories import PolymarketLiveDataClientFactory
@@ -56,6 +58,8 @@ __all__ = [
     "PolymarketExecClientConfig",
     "PolymarketInstrumentProvider",
     "PolymarketLiveDataClientFactory",
+    "PolymarketParquetCollector",
+    "PolymarketParquetCollectorConfig",
     "PolymarketLiveExecClientFactory",
     "get_polymarket_http_client",
     "get_polymarket_instrument_id",
