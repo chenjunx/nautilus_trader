@@ -54,7 +54,7 @@ def build_subscription_message(symbols: list[str]) -> dict[str, Any]:
         "action": "subscribe",
         "subscriptions": [
             {
-                "topic": "crypto_prices",
+                "topic": "crypto_prices_chainlink",
                 "type": "update",
                 "filters": subscription_filter_for_symbol(symbol),
             }
