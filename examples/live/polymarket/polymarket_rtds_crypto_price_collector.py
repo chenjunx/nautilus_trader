@@ -61,25 +61,43 @@ def subscription_filter_for_symbol(symbol: str) -> str:
     return json.dumps({"symbol": chainlink_symbol_for(symbol)})
 
 
-def build_subscription_message(symbols: list[str]) -> dict[str, Any]:
+def build_subscription_message() -> dict[str, Any]:
     return {
         "action": "subscribe",
         "subscriptions": [
             {
                 "topic": "crypto_prices_chainlink",
                 "type": "*",
-                "filters": subscription_filter_for_symbol(symbol),
-            }
-            for symbol in symbols
+                "filters": "",
+            },
         ],
     }
 
 
-def extract_symbol(msg: dict[str, Any], symbols: list[str]) -> str:
+def symbol_from_message(msg: dict[str, Any]) -> str | None:
+    payload = msg.get("payload")
+    if isinstance(payload, dict):
+        value = payload.get("symbol")
+        if isinstance(value, str) and value:
+            return storage_symbol_for(value)
+
     for key in ("symbol", "asset", "ticker"):
         value = msg.get(key)
         if isinstance(value, str) and value:
             return storage_symbol_for(value)
+
+    return None
+
+
+def message_matches_symbols(msg: dict[str, Any], symbols: list[str]) -> bool:
+    symbol = symbol_from_message(msg)
+    return symbol is None or symbol in {storage_symbol_for(item) for item in symbols}
+
+
+def extract_symbol(msg: dict[str, Any], symbols: list[str]) -> str:
+    symbol = symbol_from_message(msg)
+    if symbol is not None:
+        return symbol
 
     if len(symbols) == 1:
         return symbols[0]
@@ -126,11 +144,78 @@ def write_message(
 
 
 def extract_price(msg: dict[str, Any]) -> str | None:
+    payload = msg.get("payload")
+    if isinstance(payload, dict):
+        value = payload.get("value")
+        if value is not None:
+            return str(value)
+
     for key in ("price", "value", "markPrice", "mark_price"):
         value = msg.get(key)
         if value is not None:
             return str(value)
     return None
+
+
+def price_ts_ms_for(msg: dict[str, Any]) -> int | None:
+    payload = msg.get("payload")
+    if isinstance(payload, dict):
+        value = payload.get("timestamp")
+        if isinstance(value, int):
+            return value
+
+    value = msg.get("timestamp")
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def parquet_records_for_message(
+    msg: dict[str, Any],
+    symbols: list[str],
+    ts_recv_ns: int,
+) -> list[dict[str, Any]]:
+    if not message_matches_symbols(msg, symbols):
+        return []
+
+    raw_json = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
+    symbol = extract_symbol(msg, symbols)
+    payload = msg.get("payload")
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            records = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("value")
+                timestamp = item.get("timestamp")
+                if value is None or not isinstance(timestamp, int):
+                    continue
+                records.append(
+                    {
+                        "ts_recv_ns": ts_recv_ns,
+                        "symbol": symbol,
+                        "price_ts_ms": timestamp,
+                        "price": str(value),
+                        "raw_json": raw_json,
+                    },
+                )
+            return records
+
+    price = extract_price(msg)
+    if price is None:
+        return []
+
+    return [
+        {
+            "ts_recv_ns": ts_recv_ns,
+            "symbol": symbol,
+            "price_ts_ms": price_ts_ms_for(msg),
+            "price": price,
+            "raw_json": raw_json,
+        },
+    ]
 
 
 def write_parquet_messages(
@@ -144,24 +229,26 @@ def write_parquet_messages(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    first = rows[0]
-    first_msg = first["msg"]
-    first_ts_recv_ns = first["ts_recv_ns"]
-    symbol = extract_symbol(first_msg, symbols)
-    path = parquet_path_for(output_dir=output_dir, symbol=symbol, ts_recv_ns=first_ts_recv_ns)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     records = []
     for row in rows:
-        msg = row["msg"]
-        records.append(
-            {
-                "ts_recv_ns": row["ts_recv_ns"],
-                "symbol": extract_symbol(msg, symbols),
-                "raw_json": json.dumps(msg, separators=(",", ":"), ensure_ascii=False),
-                "price": extract_price(msg),
-            },
+        records.extend(
+            parquet_records_for_message(
+                msg=row["msg"],
+                symbols=symbols,
+                ts_recv_ns=row["ts_recv_ns"],
+            ),
         )
+
+    if not records:
+        return None
+
+    first = records[0]
+    path = parquet_path_for(
+        output_dir=output_dir,
+        symbol=first["symbol"],
+        ts_recv_ns=first["ts_recv_ns"],
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     table = pa.Table.from_pylist(records)
     pq.write_table(table, path)
@@ -183,14 +270,15 @@ def append_decoded_messages(
     buffer: list[dict[str, Any]],
     msg: Any,
     ts_recv_ns: int,
+    symbols: list[str],
 ) -> None:
     if isinstance(msg, list):
         for item in msg:
-            if isinstance(item, dict):
+            if isinstance(item, dict) and message_matches_symbols(item, symbols):
                 buffer.append({"ts_recv_ns": ts_recv_ns, "msg": item})
         return
 
-    if isinstance(msg, dict):
+    if isinstance(msg, dict) and message_matches_symbols(msg, symbols):
         buffer.append({"ts_recv_ns": ts_recv_ns, "msg": msg})
 
 
@@ -201,7 +289,7 @@ def handle_raw_message(raw: bytes, symbols: list[str], output_dir: Path) -> None
         return
 
     buffer: list[dict[str, Any]] = []
-    append_decoded_messages(buffer, msg, ts_recv_ns)
+    append_decoded_messages(buffer, msg, ts_recv_ns, symbols)
     for row in buffer:
         write_message(output_dir, symbols, row["msg"], row["ts_recv_ns"])
 
@@ -221,12 +309,12 @@ def make_runtime_handler(
 
         if output_format == "jsonl":
             jsonl_rows: list[dict[str, Any]] = []
-            append_decoded_messages(jsonl_rows, msg, ts_recv_ns)
+            append_decoded_messages(jsonl_rows, msg, ts_recv_ns, symbols)
             for row in jsonl_rows:
                 write_message(output_dir, symbols, row["msg"], row["ts_recv_ns"])
             return
 
-        append_decoded_messages(buffer, msg, ts_recv_ns)
+        append_decoded_messages(buffer, msg, ts_recv_ns, symbols)
         if len(buffer) >= max_buffer_size:
             write_parquet_messages(output_dir, symbols, list(buffer))
             buffer.clear()
@@ -291,7 +379,7 @@ async def collect_rtds_crypto_prices(
             flush_parquet_loop(output_dir, symbols, buffer, flush_interval_secs),
         )
     try:
-        await client.send_text(json.dumps(build_subscription_message(symbols)).encode("utf-8"))
+        await client.send_text(json.dumps(build_subscription_message()).encode("utf-8"))
         while client.is_active():
             await asyncio.sleep(1.0)
     finally:
