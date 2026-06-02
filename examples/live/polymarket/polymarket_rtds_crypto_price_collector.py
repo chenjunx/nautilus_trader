@@ -44,9 +44,21 @@ def parse_symbols(value: str | None) -> list[str]:
     return [item for item in symbols if item]
 
 
+def chainlink_symbol_for(symbol: str) -> str:
+    normalized = symbol.lower().replace("/", "")
+    if normalized.endswith("usdt"):
+        normalized = normalized[:-1]
+    if normalized.endswith("usd"):
+        return f"{normalized[:-3]}/usd"
+    return symbol.lower()
+
+
+def storage_symbol_for(symbol: str) -> str:
+    return symbol.lower().replace("/", "")
+
+
 def subscription_filter_for_symbol(symbol: str) -> str:
-    binance_symbol = "btcusdt" if symbol == "btcusd" else symbol
-    return json.dumps({"symbol": binance_symbol})
+    return json.dumps({"symbol": chainlink_symbol_for(symbol)})
 
 
 def build_subscription_message(symbols: list[str]) -> dict[str, Any]:
@@ -55,7 +67,7 @@ def build_subscription_message(symbols: list[str]) -> dict[str, Any]:
         "subscriptions": [
             {
                 "topic": "crypto_prices_chainlink",
-                "type": "update",
+                "type": "*",
                 "filters": subscription_filter_for_symbol(symbol),
             }
             for symbol in symbols
@@ -67,7 +79,7 @@ def extract_symbol(msg: dict[str, Any], symbols: list[str]) -> str:
     for key in ("symbol", "asset", "ticker"):
         value = msg.get(key)
         if isinstance(value, str) and value:
-            return value.lower()
+            return storage_symbol_for(value)
 
     if len(symbols) == 1:
         return symbols[0]
