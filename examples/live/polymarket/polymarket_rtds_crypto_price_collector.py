@@ -41,11 +41,21 @@ def parse_symbols(value: str | None) -> list[str]:
     return [item for item in symbols if item]
 
 
+def subscription_filter_for_symbol(symbol: str) -> str:
+    binance_symbol = "btcusdt" if symbol == "btcusd" else symbol
+    return json.dumps({"symbol": binance_symbol})
+
+
 def build_subscription_message(symbols: list[str]) -> dict[str, Any]:
     return {
         "action": "subscribe",
         "subscriptions": [
-            {"topic": "crypto_prices", "type": "update", "filters": symbol} for symbol in symbols
+            {
+                "topic": "crypto_prices",
+                "type": "update",
+                "filters": subscription_filter_for_symbol(symbol),
+            }
+            for symbol in symbols
         ],
     }
 

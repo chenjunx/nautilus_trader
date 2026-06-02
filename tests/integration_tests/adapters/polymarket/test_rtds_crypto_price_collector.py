@@ -22,6 +22,9 @@ from examples.live.polymarket.polymarket_rtds_crypto_price_collector import (
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import extract_symbol
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import output_path_for
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import parse_symbols
+from examples.live.polymarket.polymarket_rtds_crypto_price_collector import (
+    subscription_filter_for_symbol,
+)
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import write_message
 
 
@@ -34,14 +37,26 @@ def test_parse_symbols_normalizes_comma_separated_values() -> None:
     assert parse_symbols(" BTCUSD, ethusdt ,btc-usd ") == ["btcusd", "ethusdt", "btc-usd"]
 
 
+def test_subscription_filter_maps_btcusd_to_binance_btcusdt_json() -> None:
+    assert subscription_filter_for_symbol("btcusd") == json.dumps({"symbol": "btcusdt"})
+
+
 def test_build_subscription_message_uses_crypto_prices_update_filters() -> None:
     msg = build_subscription_message(["btcusd", "ethusdt"])
 
     assert msg == {
         "action": "subscribe",
         "subscriptions": [
-            {"topic": "crypto_prices", "type": "update", "filters": "btcusd"},
-            {"topic": "crypto_prices", "type": "update", "filters": "ethusdt"},
+            {
+                "topic": "crypto_prices",
+                "type": "update",
+                "filters": json.dumps({"symbol": "btcusdt"}),
+            },
+            {
+                "topic": "crypto_prices",
+                "type": "update",
+                "filters": json.dumps({"symbol": "ethusdt"}),
+            },
         ],
     }
 
