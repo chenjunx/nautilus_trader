@@ -34,6 +34,7 @@ DEFAULT_PING_INTERVAL_SECS = 5.0
 DEFAULT_OUTPUT_FORMAT = "parquet"
 DEFAULT_FLUSH_INTERVAL_SECS = 5.0
 DEFAULT_MAX_BUFFER_SIZE = 1_000
+DEFAULT_STALE_TIMEOUT_SECS = 60.0
 
 
 def parse_symbols(value: str | None) -> list[str]:
@@ -55,6 +56,14 @@ def chainlink_symbol_for(symbol: str) -> str:
 
 def storage_symbol_for(symbol: str) -> str:
     return symbol.lower().replace("/", "")
+
+
+def should_reconnect_for_stale_messages(
+    last_msg_ns: int,
+    now_ns: int,
+    timeout_secs: float,
+) -> bool:
+    return now_ns - last_msg_ns >= int(timeout_secs * 1_000_000_000)
 
 
 def subscription_filter_for_symbol(symbol: str) -> str:
@@ -300,9 +309,11 @@ def make_runtime_handler(
     output_format: str,
     buffer: list[dict[str, Any]],
     max_buffer_size: int,
+    last_msg_ns: dict[str, int],
 ) -> Any:
     def handle(raw: bytes) -> None:
         ts_recv_ns = time.time_ns()
+        last_msg_ns["value"] = ts_recv_ns
         msg = decode_raw_message(raw)
         if msg is None:
             return
@@ -316,7 +327,10 @@ def make_runtime_handler(
 
         append_decoded_messages(buffer, msg, ts_recv_ns, symbols)
         if len(buffer) >= max_buffer_size:
-            write_parquet_messages(output_dir, symbols, list(buffer))
+            rows = list(buffer)
+            path = write_parquet_messages(output_dir, symbols, rows)
+            if path is not None:
+                print(f"Flushed {len(rows)} RTDS messages to {path}", flush=True)
             buffer.clear()
 
     return handle
@@ -337,7 +351,10 @@ async def flush_parquet_loop(
     while True:
         await asyncio.sleep(interval_secs)
         if buffer:
-            write_parquet_messages(output_dir, symbols, list(buffer))
+            rows = list(buffer)
+            path = write_parquet_messages(output_dir, symbols, rows)
+            if path is not None:
+                print(f"Flushed {len(rows)} RTDS messages to {path}", flush=True)
             buffer.clear()
 
 
@@ -349,6 +366,7 @@ async def collect_rtds_crypto_prices(
     output_format: str,
     flush_interval_secs: float,
     max_buffer_size: int,
+    stale_timeout_secs: float,
 ) -> None:
     from nautilus_trader.core.nautilus_pyo3 import WebSocketClient
     from nautilus_trader.core.nautilus_pyo3 import WebSocketConfig
@@ -361,6 +379,7 @@ async def collect_rtds_crypto_prices(
         idle_timeout_ms=60_000,
     )
     buffer: list[dict[str, Any]] = []
+    last_msg_ns = {"value": time.time_ns()}
     client = await WebSocketClient.connect(
         loop_=loop,
         config=config,
@@ -370,6 +389,7 @@ async def collect_rtds_crypto_prices(
             output_format=output_format,
             buffer=buffer,
             max_buffer_size=max_buffer_size,
+            last_msg_ns=last_msg_ns,
         ),
     )
     ping_task = asyncio.create_task(send_ping_loop(client, ping_interval_secs))
@@ -379,12 +399,27 @@ async def collect_rtds_crypto_prices(
             flush_parquet_loop(output_dir, symbols, buffer, flush_interval_secs),
         )
     try:
-        await client.send_text(json.dumps(build_subscription_message()).encode("utf-8"))
+        subscription = build_subscription_message()
+        print(f"Subscribing to Polymarket RTDS: {json.dumps(subscription)}", flush=True)
+        await client.send_text(json.dumps(subscription).encode("utf-8"))
         while client.is_active():
             await asyncio.sleep(1.0)
+            if should_reconnect_for_stale_messages(
+                last_msg_ns=last_msg_ns["value"],
+                now_ns=time.time_ns(),
+                timeout_secs=stale_timeout_secs,
+            ):
+                print(
+                    f"No RTDS messages for {stale_timeout_secs:g} seconds; reconnecting",
+                    flush=True,
+                )
+                break
     finally:
         if output_format == "parquet" and buffer:
-            write_parquet_messages(output_dir, symbols, list(buffer))
+            rows = list(buffer)
+            path = write_parquet_messages(output_dir, symbols, rows)
+            if path is not None:
+                print(f"Flushed {len(rows)} RTDS messages to {path}", flush=True)
             buffer.clear()
         ping_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -411,6 +446,9 @@ async def run_forever() -> None:
     max_buffer_size = int(
         os.environ.get("POLYMARKET_RTDS_MAX_BUFFER_SIZE", str(DEFAULT_MAX_BUFFER_SIZE)),
     )
+    stale_timeout_secs = float(
+        os.environ.get("POLYMARKET_RTDS_STALE_TIMEOUT_SECS", str(DEFAULT_STALE_TIMEOUT_SECS)),
+    )
 
     while True:
         try:
@@ -422,6 +460,7 @@ async def run_forever() -> None:
                 output_format=output_format,
                 flush_interval_secs=flush_interval_secs,
                 max_buffer_size=max_buffer_size,
+                stale_timeout_secs=stale_timeout_secs,
             )
         except Exception as exc:
             print(f"RTDS connection lost: {exc}; reconnecting in 5 seconds", flush=True)
