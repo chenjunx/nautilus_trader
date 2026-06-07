@@ -6,7 +6,7 @@ PROJECT_DIR="/home/admin/nautilus_trader"
 
 # === RTDS 配置 ===
 POLYMARKET_RTDS_WS_URL="wss://ws-live-data.polymarket.com"
-POLYMARKET_RTDS_SYMBOLS="btcusd"
+POLYMARKET_RTDS_SYMBOLS="btcusd,ethusd,solusd"
 POLYMARKET_RTDS_OUTPUT_DIR="/home/admin/data/polymarket/rtds"
 POLYMARKET_RTDS_PING_INTERVAL_SECS="5"
 
@@ -38,7 +38,7 @@ start() {
     echo "Polymarket RTDS BTCUSD collector is already running."
     echo "  pid: $pid"
     echo "  log: $LOG_FILE"
-    echo "  output: $POLYMARKET_RTDS_OUTPUT_DIR/crypto_prices/btcusd"
+    echo "  output: $POLYMARKET_RTDS_OUTPUT_DIR/crypto_prices"
     return 0
   fi
 
@@ -104,7 +104,7 @@ status() {
     echo "Polymarket RTDS BTCUSD collector is running."
     echo "  pid: $pid"
     echo "  log: $LOG_FILE"
-    echo "  output: $POLYMARKET_RTDS_OUTPUT_DIR/crypto_prices/btcusd"
+    echo "  output: $POLYMARKET_RTDS_OUTPUT_DIR/crypto_prices"
   else
     echo "Polymarket RTDS BTCUSD collector is not running."
     [[ -f "$PID_FILE" ]] && echo "  stale pid file: $PID_FILE"
