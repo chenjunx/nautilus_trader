@@ -39,6 +39,7 @@ class TestBinanceCoreFunctions:
             ("ETHUSDT-PERP", "ETHUSDT"),
             ("BNBUSDT-PERP", "BNBUSDT"),
             ("BTCBUSD-PERP", "BTCBUSD"),
+            ("KAITOUSDC-PERP", "KAITOUSDC"),
             # Short-base linear perpetuals
             ("AIUSDT-PERP", "AIUSDT"),
             # COIN-M (inverse) perpetuals: replace -PERP with _PERP
@@ -64,6 +65,7 @@ class TestBinanceCoreFunctions:
             # Linear perpetuals round-trip
             ("BTCUSDT", BinanceAccountType.USDT_FUTURES, "BTCUSDT-PERP"),
             ("ETHUSDT", BinanceAccountType.USDT_FUTURES, "ETHUSDT-PERP"),
+            ("KAITOUSDC", BinanceAccountType.USDT_FUTURES, "KAITOUSDC-PERP"),
             # Spot: no suffix added
             ("BTCUSDT", BinanceAccountType.SPOT, "BTCUSDT"),
         ],
