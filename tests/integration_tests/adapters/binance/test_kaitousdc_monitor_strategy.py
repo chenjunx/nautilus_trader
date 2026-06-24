@@ -41,8 +41,12 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.sample_mid is True
     assert config.mid_sample_interval_secs == 2.0
     assert config.mid_sample_history_size == 2
-    assert config.calculate_ewma_sigma is True
+    assert config.calculate_ewma_variance is True
     assert config.ewma_lambda == 0.94
+    assert config.reservation_price_gamma == 0.1
+    assert config.reservation_price_horizon == 150.0
+    assert config.reservation_price_min_q == 1
+    assert config.reservation_price_max_q == 10
 
 
 def test_kaitousdc_monitor_config_accepts_explicit_bar_type() -> None:
@@ -77,8 +81,8 @@ def test_kaitousdc_monitor_strategy_initializes_counters() -> None:
     assert strategy._mid_samples.maxlen == 2
     assert strategy._last_mid is None
     assert strategy._ewma_delta_s_var is None
-    assert strategy._ewma_sigma is None
     assert strategy._ewma_delta_s_count == 0
+    assert strategy._reservation_prices is None
 
 
 def test_kaitousdc_monitor_strategy_defines_mid_sampling_timer() -> None:
@@ -92,18 +96,22 @@ def test_kaitousdc_monitor_strategy_defines_mid_sampling_timer() -> None:
     assert "def on_timer" in content
 
 
-def test_kaitousdc_monitor_strategy_defines_ewma_sigma_fields() -> None:
+def test_kaitousdc_monitor_strategy_defines_variance_and_reservation_fields() -> None:
     content = STRATEGY_PATH.read_text(encoding="utf-8")
 
-    assert "calculate_ewma_sigma" in content
+    assert "calculate_ewma_variance" in content
+    assert "calculate_ewma_sigma" not in content
     assert "ewma_lambda" in content
     assert "_last_mid" in content
     assert "_ewma_delta_s_var" in content
-    assert "_ewma_sigma" in content
     assert "_ewma_delta_s_count" in content
-    assert "delta_s" in content
-    assert "ewma_delta_s_var" in content
-    assert "ewma_sigma" in content
+    assert "_ewma_sigma" not in content
+    assert "ewma_sigma" not in content
+    assert "reservation_price_gamma" in content
+    assert "reservation_price_horizon" in content
+    assert "reservation_price_min_q" in content
+    assert "reservation_price_max_q" in content
+    assert "reservation_prices" in content
 
 
 def test_kaitousdc_monitor_modules_import() -> None:

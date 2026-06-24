@@ -48,7 +48,7 @@ class MidPriceSample:
     spread: str
     delta_s: str | None
     ewma_delta_s_var: str | None
-    ewma_sigma: str | None
+    reservation_prices: dict[int, str] | None
 
 
 class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
@@ -77,10 +77,18 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The interval in seconds for mid price sampling.
     mid_sample_history_size : PositiveInt, default 2
         The number of recent mid price samples to keep in memory.
-    calculate_ewma_sigma : bool, default True
-        If EWMA sigma should be calculated from fixed-interval mid price increments.
+    calculate_ewma_variance : bool, default True
+        If EWMA variance should be calculated from fixed-interval mid price increments.
     ewma_lambda : PositiveFloat, default 0.94
         The EWMA decay factor for squared mid price increments.
+    reservation_price_gamma : PositiveFloat, default 0.1
+        The risk aversion coefficient used for reservation prices.
+    reservation_price_horizon : PositiveFloat, default 150.0
+        The horizon/multiplier used for reservation prices.
+    reservation_price_min_q : PositiveInt, default 1
+        The first positive inventory level to calculate.
+    reservation_price_max_q : PositiveInt, default 10
+        The final positive inventory level to calculate.
 
     """
 
@@ -94,8 +102,12 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     sample_mid: bool = True
     mid_sample_interval_secs: PositiveFloat = 2.0
     mid_sample_history_size: PositiveInt = 2
-    calculate_ewma_sigma: bool = True
+    calculate_ewma_variance: bool = True
     ewma_lambda: PositiveFloat = 0.94
+    reservation_price_gamma: PositiveFloat = 0.1
+    reservation_price_horizon: PositiveFloat = 150.0
+    reservation_price_min_q: PositiveInt = 1
+    reservation_price_max_q: PositiveInt = 10
 
 
 class KaitousdcMonitorStrategy(Strategy):
@@ -129,8 +141,8 @@ class KaitousdcMonitorStrategy(Strategy):
         )
         self._last_mid: Decimal | None = None
         self._ewma_delta_s_var: Decimal | None = None
-        self._ewma_sigma: Decimal | None = None
         self._ewma_delta_s_count = 0
+        self._reservation_prices: dict[int, str] | None = None
 
     def on_start(self) -> None:
         """
@@ -170,8 +182,12 @@ class KaitousdcMonitorStrategy(Strategy):
             f"book_snapshots={self.config.subscribe_book_snapshots} | "
             f"sample_mid={self.config.sample_mid} | "
             f"mid_sample_interval_secs={self.config.mid_sample_interval_secs} | "
-            f"calculate_ewma_sigma={self.config.calculate_ewma_sigma} | "
-            f"ewma_lambda={self.config.ewma_lambda}",
+            f"calculate_ewma_variance={self.config.calculate_ewma_variance} | "
+            f"ewma_lambda={self.config.ewma_lambda} | "
+            f"reservation_price_gamma={self.config.reservation_price_gamma} | "
+            f"reservation_price_horizon={self.config.reservation_price_horizon} | "
+            f"reservation_price_min_q={self.config.reservation_price_min_q} | "
+            f"reservation_price_max_q={self.config.reservation_price_max_q}",
         )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -217,7 +233,7 @@ class KaitousdcMonitorStrategy(Strategy):
             f"spread={sample.spread} | "
             f"delta_s={sample.delta_s} | "
             f"ewma_delta_s_var={sample.ewma_delta_s_var} | "
-            f"ewma_sigma={sample.ewma_sigma} | "
+            f"reservation_prices={sample.reservation_prices} | "
             f"count={self._mid_sample_count}",
         )
 
@@ -228,8 +244,9 @@ class KaitousdcMonitorStrategy(Strategy):
         mid = bid + spread / Decimal("2")
 
         delta_s: Decimal | None = None
-        if self.config.calculate_ewma_sigma:
-            delta_s = self._update_ewma_sigma(mid)
+        if self.config.calculate_ewma_variance:
+            delta_s = self._update_ewma_delta_s_var(mid)
+            self._reservation_prices = self._calculate_reservation_prices(mid)
 
         return MidPriceSample(
             ts_event=quote.ts_event,
@@ -242,10 +259,10 @@ class KaitousdcMonitorStrategy(Strategy):
             ewma_delta_s_var=str(self._ewma_delta_s_var)
             if self._ewma_delta_s_var is not None
             else None,
-            ewma_sigma=str(self._ewma_sigma) if self._ewma_sigma is not None else None,
+            reservation_prices=self._reservation_prices,
         )
 
-    def _update_ewma_sigma(self, mid: Decimal) -> Decimal | None:
+    def _update_ewma_delta_s_var(self, mid: Decimal) -> Decimal | None:
         if self._last_mid is None:
             self._last_mid = mid
             return None
@@ -262,12 +279,23 @@ class KaitousdcMonitorStrategy(Strategy):
                 + (Decimal("1") - lambda_) * delta_s_sq
             )
 
-        self._ewma_sigma = (
-            self._ewma_delta_s_var / Decimal(str(self.config.mid_sample_interval_secs))
-        ).sqrt()
         self._ewma_delta_s_count += 1
         self._last_mid = mid
         return delta_s
+
+    def _calculate_reservation_prices(self, mid: Decimal) -> dict[int, str] | None:
+        if self._ewma_delta_s_var is None:
+            return None
+
+        gamma = Decimal(str(self.config.reservation_price_gamma))
+        horizon = Decimal(str(self.config.reservation_price_horizon))
+        return {
+            q: str(mid - Decimal(q) * gamma * self._ewma_delta_s_var * horizon)
+            for q in range(
+                self.config.reservation_price_min_q,
+                self.config.reservation_price_max_q + 1,
+            )
+        }
 
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
@@ -339,6 +367,6 @@ class KaitousdcMonitorStrategy(Strategy):
             f"recent_mid_samples={list(self._mid_samples)} | "
             f"ewma_delta_s_count={self._ewma_delta_s_count} | "
             f"ewma_delta_s_var={self._ewma_delta_s_var} | "
-            f"ewma_sigma={self._ewma_sigma} | "
+            f"reservation_prices={self._reservation_prices} | "
             f"received_data={total > 0}",
         )
