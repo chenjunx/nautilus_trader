@@ -37,7 +37,9 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.subscribe_trades is True
     assert config.subscribe_bars is True
     assert config.subscribe_book_snapshots is False
+    assert config.subscribe_book_deltas is True
     assert config.book_interval_ms == 1000
+    assert config.book_depth == 100
     assert config.sample_mid is True
     assert config.mid_sample_interval_secs == 2.0
     assert config.mid_sample_history_size == 2
@@ -48,6 +50,10 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.reservation_price_min_q == 1
     assert config.reservation_price_max_q == 10
     assert config.quote_intensity_k == 1.5
+    assert config.persist_market_data is True
+    assert config.catalog_path == "data/kaitousdc/catalog"
+    assert config.flush_interval_secs == 5.0
+    assert config.max_buffer_size == 10_000
 
 
 def test_kaitousdc_monitor_config_accepts_explicit_bar_type() -> None:
@@ -77,7 +83,12 @@ def test_kaitousdc_monitor_strategy_initializes_counters() -> None:
     assert strategy._trade_count == 0
     assert strategy._bar_count == 0
     assert strategy._book_count == 0
+    assert strategy._book_delta_count == 0
     assert strategy._last_quote is None
+    assert strategy._book is None
+    assert strategy._catalog is None
+    assert strategy._trade_buffer == []
+    assert strategy._book_delta_buffer == []
     assert strategy._mid_sample_count == 0
     assert strategy._mid_samples.maxlen == 2
     assert strategy._last_mid is None
@@ -123,6 +134,23 @@ def test_kaitousdc_monitor_strategy_defines_variance_reservation_and_quote_field
     assert ".ln()" in content
 
 
+def test_kaitousdc_monitor_strategy_defines_market_data_persistence() -> None:
+    content = STRATEGY_PATH.read_text(encoding="utf-8")
+
+    assert "ParquetDataCatalog" in content
+    assert "persist_market_data" in content
+    assert "catalog_path" in content
+    assert "flush_interval_secs" in content
+    assert "max_buffer_size" in content
+    assert "subscribe_book_deltas" in content
+    assert "subscribe_order_book_deltas" in content
+    assert "def on_order_book_deltas" in content
+    assert "_trade_buffer" in content
+    assert "_book_delta_buffer" in content
+    assert "_flush_market_data" in content
+    assert "write_data" in content
+
+
 def test_kaitousdc_monitor_modules_import() -> None:
     importlib.import_module("nautilus_trader.examples.strategies.kaitousdc_monitor")
     importlib.import_module("examples.live.binance.binance_kaitousdc_monitor")
@@ -140,6 +168,12 @@ def test_kaitousdc_monitor_runner_targets_binance_usdt_futures_data_only() -> No
     assert "InstrumentProviderConfig(load_ids=frozenset([instrument_id]))" in content
     assert "BinanceLiveDataClientFactory" in content
     assert "KaitousdcMonitorStrategy" in content
+    assert "subscribe_book_deltas=True" in content
+    assert "book_depth=100" in content
+    assert "persist_market_data=True" in content
+    assert 'catalog_path="data/kaitousdc/catalog"' in content
+    assert "flush_interval_secs=5.0" in content
+    assert "max_buffer_size=10_000" in content
     assert "exec_clients" not in content
     assert "BinanceExecClientConfig" not in content
     assert "BinanceLiveExecClientFactory" not in content

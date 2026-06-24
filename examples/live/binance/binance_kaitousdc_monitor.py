@@ -64,6 +64,12 @@ strategy = KaitousdcMonitorStrategy(
     config=KaitousdcMonitorConfig(
         instrument_id=instrument_id,
         bar_type=bar_type,
+        subscribe_book_deltas=True,
+        book_depth=100,
+        persist_market_data=True,
+        catalog_path="data/kaitousdc/catalog",
+        flush_interval_secs=5.0,
+        max_buffer_size=10_000,
     ),
 )
 node.trader.add_strategy(strategy)

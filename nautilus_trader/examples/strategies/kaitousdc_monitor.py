@@ -16,6 +16,7 @@
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
+import time
 
 import pandas as pd
 
@@ -26,11 +27,14 @@ from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
+from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -71,8 +75,12 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         If bars should be subscribed when ``bar_type`` is provided.
     subscribe_book_snapshots : bool, default False
         If order book snapshots should be subscribed at ``book_interval_ms``.
+    subscribe_book_deltas : bool, default True
+        If order book deltas should be subscribed and persisted.
     book_interval_ms : PositiveInt, default 1000
         The interval in milliseconds for order book snapshots.
+    book_depth : PositiveInt, default 100
+        The requested depth for order book delta subscriptions.
     sample_mid : bool, default True
         If mid price should be sampled from the latest quote on a timer.
     mid_sample_interval_secs : PositiveFloat, default 2.0
@@ -93,6 +101,14 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The final positive inventory level to calculate.
     quote_intensity_k : PositiveFloat, default 1.5
         The order book intensity parameter used in the quote spread formula.
+    persist_market_data : bool, default True
+        If received trade ticks and order book deltas should be persisted.
+    catalog_path : str, default "data/kaitousdc/catalog"
+        The local parquet data catalog path for persisted market data.
+    flush_interval_secs : PositiveFloat, default 5.0
+        The maximum interval in seconds between market data flushes.
+    max_buffer_size : PositiveInt, default 10000
+        The maximum buffered trade and book delta count before flushing.
 
     """
 
@@ -102,7 +118,9 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     subscribe_trades: bool = True
     subscribe_bars: bool = True
     subscribe_book_snapshots: bool = False
+    subscribe_book_deltas: bool = True
     book_interval_ms: PositiveInt = 1000
+    book_depth: PositiveInt = 100
     sample_mid: bool = True
     mid_sample_interval_secs: PositiveFloat = 2.0
     mid_sample_history_size: PositiveInt = 2
@@ -113,14 +131,19 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
     quote_intensity_k: PositiveFloat = 1.5
+    persist_market_data: bool = True
+    catalog_path: str = "data/kaitousdc/catalog"
+    flush_interval_secs: PositiveFloat = 5.0
+    max_buffer_size: PositiveInt = 10_000
 
 
 class KaitousdcMonitorStrategy(Strategy):
     """
     A data-only Binance futures monitor for ``KAITOUSDC-PERP``.
 
-    The strategy subscribes to configured market data streams and logs received
-    data with simple counters. It is intentionally monitoring-only.
+    The strategy subscribes to configured market data streams, logs received
+    data with simple counters, and persists trade ticks and order book deltas.
+    It is intentionally monitoring-only.
 
     Parameters
     ----------
@@ -139,7 +162,13 @@ class KaitousdcMonitorStrategy(Strategy):
         self._trade_count = 0
         self._bar_count = 0
         self._book_count = 0
+        self._book_delta_count = 0
         self._last_quote: QuoteTick | None = None
+        self._book: OrderBook | None = None
+        self._catalog: ParquetDataCatalog | None = None
+        self._trade_buffer: list[TradeTick] = []
+        self._book_delta_buffer: list[OrderBookDelta] = []
+        self._last_flush_monotonic = time.monotonic()
         self._mid_sample_count = 0
         self._mid_samples: deque[MidPriceSample] = deque(
             maxlen=config.mid_sample_history_size,
@@ -161,6 +190,16 @@ class KaitousdcMonitorStrategy(Strategy):
             self.stop()
             return
 
+        if self.config.persist_market_data:
+            self._catalog = ParquetDataCatalog(self.config.catalog_path)
+            self._catalog.write_data([self.instrument])
+
+        if self.config.subscribe_book_deltas:
+            self._book = OrderBook(
+                instrument_id=self.config.instrument_id,
+                book_type=BookType.L2_MBP,
+            )
+
         if self.config.subscribe_quotes:
             self.subscribe_quote_ticks(instrument_id=self.config.instrument_id)
         if self.config.subscribe_trades:
@@ -172,6 +211,12 @@ class KaitousdcMonitorStrategy(Strategy):
                 instrument_id=self.config.instrument_id,
                 book_type=BookType.L2_MBP,
                 interval_ms=self.config.book_interval_ms,
+            )
+        if self.config.subscribe_book_deltas:
+            self.subscribe_order_book_deltas(
+                instrument_id=self.config.instrument_id,
+                book_type=BookType.L2_MBP,
+                depth=self.config.book_depth,
             )
         if self.config.sample_mid:
             self.clock.set_timer(
@@ -187,6 +232,8 @@ class KaitousdcMonitorStrategy(Strategy):
             f"trades={self.config.subscribe_trades} | "
             f"bars={self.config.subscribe_bars and self.config.bar_type is not None} | "
             f"book_snapshots={self.config.subscribe_book_snapshots} | "
+            f"book_deltas={self.config.subscribe_book_deltas} | "
+            f"book_depth={self.config.book_depth} | "
             f"sample_mid={self.config.sample_mid} | "
             f"mid_sample_interval_secs={self.config.mid_sample_interval_secs} | "
             f"calculate_ewma_variance={self.config.calculate_ewma_variance} | "
@@ -195,7 +242,11 @@ class KaitousdcMonitorStrategy(Strategy):
             f"reservation_price_horizon={self.config.reservation_price_horizon} | "
             f"reservation_price_min_q={self.config.reservation_price_min_q} | "
             f"reservation_price_max_q={self.config.reservation_price_max_q} | "
-            f"quote_intensity_k={self.config.quote_intensity_k}",
+            f"quote_intensity_k={self.config.quote_intensity_k} | "
+            f"persist_market_data={self.config.persist_market_data} | "
+            f"catalog_path={self.config.catalog_path} | "
+            f"flush_interval_secs={self.config.flush_interval_secs} | "
+            f"max_buffer_size={self.config.max_buffer_size}",
         )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -338,11 +389,45 @@ class KaitousdcMonitorStrategy(Strategy):
             for q, reservation_price in self._reservation_prices.items()
         }
 
+    def _flush_market_data_if_needed(self) -> None:
+        if not self.config.persist_market_data:
+            return
+
+        pending = len(self._trade_buffer) + len(self._book_delta_buffer)
+        if pending >= self.config.max_buffer_size:
+            self._flush_market_data()
+            return
+
+        elapsed = time.monotonic() - self._last_flush_monotonic
+        if elapsed >= self.config.flush_interval_secs:
+            self._flush_market_data()
+
+    def _flush_market_data(self) -> None:
+        if not self.config.persist_market_data or self._catalog is None:
+            return
+
+        if self._book_delta_buffer:
+            data = sorted(self._book_delta_buffer, key=lambda x: x.ts_init)
+            self._catalog.write_data(data, skip_disjoint_check=True)
+            self.log.info(f"Flushed {len(data)} KAITOUSDC order book deltas")
+            self._book_delta_buffer.clear()
+
+        if self._trade_buffer:
+            data = sorted(self._trade_buffer, key=lambda x: x.ts_init)
+            self._catalog.write_data(data, skip_disjoint_check=True)
+            self.log.info(f"Flushed {len(data)} KAITOUSDC trades")
+            self._trade_buffer.clear()
+
+        self._last_flush_monotonic = time.monotonic()
+
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
         Actions to be performed when a trade tick is received.
         """
         self._trade_count += 1
+        if self.config.persist_market_data:
+            self._trade_buffer.append(tick)
+            self._flush_market_data_if_needed()
         self.log.info(
             "Trade tick | "
             f"instrument_id={tick.instrument_id} | "
@@ -368,6 +453,32 @@ class KaitousdcMonitorStrategy(Strategy):
             f"count={self._bar_count}",
         )
 
+    def on_order_book_deltas(self, deltas: OrderBookDeltas) -> None:
+        """
+        Actions to be performed when order book deltas are received.
+        """
+        self._book_delta_count += len(deltas.deltas)
+        if self._book is not None:
+            self._book.apply_deltas(deltas)
+
+        if self.config.persist_market_data:
+            self._book_delta_buffer.extend(deltas.deltas)
+            self._flush_market_data_if_needed()
+
+        bid = self._book.best_bid_price() if self._book is not None else None
+        ask = self._book.best_ask_price() if self._book is not None else None
+        spread = ask - bid if bid is not None and ask is not None else None
+        self.log.info(
+            "Order book deltas | "
+            f"instrument_id={deltas.instrument_id} | "
+            f"sequence={deltas.sequence} | "
+            f"delta_count={len(deltas.deltas)} | "
+            f"bid={bid} | "
+            f"ask={ask} | "
+            f"spread={spread} | "
+            f"count={self._book_delta_count}",
+        )
+
     def on_order_book(self, order_book: OrderBook) -> None:
         """
         Actions to be performed when an order book snapshot is received.
@@ -389,11 +500,13 @@ class KaitousdcMonitorStrategy(Strategy):
         """
         Actions to be performed when the strategy is stopped.
         """
+        self._flush_market_data()
         total = (
             self._quote_count
             + self._trade_count
             + self._bar_count
             + self._book_count
+            + self._book_delta_count
             + self._mid_sample_count
             + self._ewma_delta_s_count
         )
@@ -404,6 +517,9 @@ class KaitousdcMonitorStrategy(Strategy):
             f"trades={self._trade_count} | "
             f"bars={self._bar_count} | "
             f"book_snapshots={self._book_count} | "
+            f"book_deltas={self._book_delta_count} | "
+            f"pending_trades={len(self._trade_buffer)} | "
+            f"pending_book_deltas={len(self._book_delta_buffer)} | "
             f"mid_samples={self._mid_sample_count} | "
             f"recent_mid_samples={list(self._mid_samples)} | "
             f"ewma_delta_s_count={self._ewma_delta_s_count} | "
