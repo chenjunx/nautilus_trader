@@ -49,6 +49,8 @@ class MidPriceSample:
     delta_s: str | None
     ewma_delta_s_var: str | None
     reservation_prices: dict[int, str] | None
+    quote_spread: str | None
+    quote_prices: dict[int, dict[str, str]] | None
 
 
 class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
@@ -89,6 +91,8 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The first positive inventory level to calculate.
     reservation_price_max_q : PositiveInt, default 10
         The final positive inventory level to calculate.
+    quote_intensity_k : PositiveFloat, default 1.5
+        The order book intensity parameter used in the quote spread formula.
 
     """
 
@@ -108,6 +112,7 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     reservation_price_horizon: PositiveFloat = 150.0
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
+    quote_intensity_k: PositiveFloat = 1.5
 
 
 class KaitousdcMonitorStrategy(Strategy):
@@ -143,6 +148,8 @@ class KaitousdcMonitorStrategy(Strategy):
         self._ewma_delta_s_var: Decimal | None = None
         self._ewma_delta_s_count = 0
         self._reservation_prices: dict[int, str] | None = None
+        self._quote_spread: str | None = None
+        self._quote_prices: dict[int, dict[str, str]] | None = None
 
     def on_start(self) -> None:
         """
@@ -187,7 +194,8 @@ class KaitousdcMonitorStrategy(Strategy):
             f"reservation_price_gamma={self.config.reservation_price_gamma} | "
             f"reservation_price_horizon={self.config.reservation_price_horizon} | "
             f"reservation_price_min_q={self.config.reservation_price_min_q} | "
-            f"reservation_price_max_q={self.config.reservation_price_max_q}",
+            f"reservation_price_max_q={self.config.reservation_price_max_q} | "
+            f"quote_intensity_k={self.config.quote_intensity_k}",
         )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -234,6 +242,8 @@ class KaitousdcMonitorStrategy(Strategy):
             f"delta_s={sample.delta_s} | "
             f"ewma_delta_s_var={sample.ewma_delta_s_var} | "
             f"reservation_prices={sample.reservation_prices} | "
+            f"quote_spread={sample.quote_spread} | "
+            f"quote_prices={sample.quote_prices} | "
             f"count={self._mid_sample_count}",
         )
 
@@ -247,6 +257,8 @@ class KaitousdcMonitorStrategy(Strategy):
         if self.config.calculate_ewma_variance:
             delta_s = self._update_ewma_delta_s_var(mid)
             self._reservation_prices = self._calculate_reservation_prices(mid)
+            self._quote_spread = self._calculate_quote_spread()
+            self._quote_prices = self._calculate_quote_prices()
 
         return MidPriceSample(
             ts_event=quote.ts_event,
@@ -260,6 +272,8 @@ class KaitousdcMonitorStrategy(Strategy):
             if self._ewma_delta_s_var is not None
             else None,
             reservation_prices=self._reservation_prices,
+            quote_spread=self._quote_spread,
+            quote_prices=self._quote_prices,
         )
 
     def _update_ewma_delta_s_var(self, mid: Decimal) -> Decimal | None:
@@ -295,6 +309,33 @@ class KaitousdcMonitorStrategy(Strategy):
                 self.config.reservation_price_min_q,
                 self.config.reservation_price_max_q + 1,
             )
+        }
+
+    def _calculate_quote_spread(self) -> str | None:
+        if self._ewma_delta_s_var is None:
+            return None
+
+        gamma = Decimal(str(self.config.reservation_price_gamma))
+        horizon = Decimal(str(self.config.reservation_price_horizon))
+        k = Decimal(str(self.config.quote_intensity_k))
+        total_spread = (
+            gamma * self._ewma_delta_s_var * horizon
+            + (Decimal("2") / gamma) * (Decimal("1") + gamma / k).ln()
+        )
+        return str(total_spread)
+
+    def _calculate_quote_prices(self) -> dict[int, dict[str, str]] | None:
+        if self._reservation_prices is None or self._quote_spread is None:
+            return None
+
+        half_spread = Decimal(self._quote_spread) / Decimal("2")
+        return {
+            q: {
+                "reservation_price": reservation_price,
+                "bid": str(Decimal(reservation_price) - half_spread),
+                "ask": str(Decimal(reservation_price) + half_spread),
+            }
+            for q, reservation_price in self._reservation_prices.items()
         }
 
     def on_trade_tick(self, tick: TradeTick) -> None:
@@ -368,5 +409,7 @@ class KaitousdcMonitorStrategy(Strategy):
             f"ewma_delta_s_count={self._ewma_delta_s_count} | "
             f"ewma_delta_s_var={self._ewma_delta_s_var} | "
             f"reservation_prices={self._reservation_prices} | "
+            f"quote_spread={self._quote_spread} | "
+            f"quote_prices={self._quote_prices} | "
             f"received_data={total > 0}",
         )

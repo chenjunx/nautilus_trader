@@ -47,6 +47,7 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.reservation_price_horizon == 150.0
     assert config.reservation_price_min_q == 1
     assert config.reservation_price_max_q == 10
+    assert config.quote_intensity_k == 1.5
 
 
 def test_kaitousdc_monitor_config_accepts_explicit_bar_type() -> None:
@@ -83,6 +84,8 @@ def test_kaitousdc_monitor_strategy_initializes_counters() -> None:
     assert strategy._ewma_delta_s_var is None
     assert strategy._ewma_delta_s_count == 0
     assert strategy._reservation_prices is None
+    assert strategy._quote_spread is None
+    assert strategy._quote_prices is None
 
 
 def test_kaitousdc_monitor_strategy_defines_mid_sampling_timer() -> None:
@@ -96,7 +99,7 @@ def test_kaitousdc_monitor_strategy_defines_mid_sampling_timer() -> None:
     assert "def on_timer" in content
 
 
-def test_kaitousdc_monitor_strategy_defines_variance_and_reservation_fields() -> None:
+def test_kaitousdc_monitor_strategy_defines_variance_reservation_and_quote_fields() -> None:
     content = STRATEGY_PATH.read_text(encoding="utf-8")
 
     assert "calculate_ewma_variance" in content
@@ -112,6 +115,12 @@ def test_kaitousdc_monitor_strategy_defines_variance_and_reservation_fields() ->
     assert "reservation_price_min_q" in content
     assert "reservation_price_max_q" in content
     assert "reservation_prices" in content
+    assert "quote_intensity_k" in content
+    assert "_quote_spread" in content
+    assert "_quote_prices" in content
+    assert "quote_spread" in content
+    assert "quote_prices" in content
+    assert ".ln()" in content
 
 
 def test_kaitousdc_monitor_modules_import() -> None:
