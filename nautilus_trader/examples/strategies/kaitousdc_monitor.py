@@ -15,6 +15,7 @@
 
 from collections import deque
 from dataclasses import dataclass
+from decimal import Decimal
 
 import pandas as pd
 
@@ -45,6 +46,9 @@ class MidPriceSample:
     ask: str
     mid: str
     spread: str
+    delta_s: str | None
+    ewma_delta_s_var: str | None
+    ewma_sigma: str | None
 
 
 class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
@@ -73,6 +77,10 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The interval in seconds for mid price sampling.
     mid_sample_history_size : PositiveInt, default 2
         The number of recent mid price samples to keep in memory.
+    calculate_ewma_sigma : bool, default True
+        If EWMA sigma should be calculated from fixed-interval mid price increments.
+    ewma_lambda : PositiveFloat, default 0.94
+        The EWMA decay factor for squared mid price increments.
 
     """
 
@@ -86,6 +94,8 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     sample_mid: bool = True
     mid_sample_interval_secs: PositiveFloat = 2.0
     mid_sample_history_size: PositiveInt = 2
+    calculate_ewma_sigma: bool = True
+    ewma_lambda: PositiveFloat = 0.94
 
 
 class KaitousdcMonitorStrategy(Strategy):
@@ -117,6 +127,10 @@ class KaitousdcMonitorStrategy(Strategy):
         self._mid_samples: deque[MidPriceSample] = deque(
             maxlen=config.mid_sample_history_size,
         )
+        self._last_mid: Decimal | None = None
+        self._ewma_delta_s_var: Decimal | None = None
+        self._ewma_sigma: Decimal | None = None
+        self._ewma_delta_s_count = 0
 
     def on_start(self) -> None:
         """
@@ -155,7 +169,9 @@ class KaitousdcMonitorStrategy(Strategy):
             f"bars={self.config.subscribe_bars and self.config.bar_type is not None} | "
             f"book_snapshots={self.config.subscribe_book_snapshots} | "
             f"sample_mid={self.config.sample_mid} | "
-            f"mid_sample_interval_secs={self.config.mid_sample_interval_secs}",
+            f"mid_sample_interval_secs={self.config.mid_sample_interval_secs} | "
+            f"calculate_ewma_sigma={self.config.calculate_ewma_sigma} | "
+            f"ewma_lambda={self.config.ewma_lambda}",
         )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -199,12 +215,22 @@ class KaitousdcMonitorStrategy(Strategy):
             f"ask={sample.ask} | "
             f"mid={sample.mid} | "
             f"spread={sample.spread} | "
+            f"delta_s={sample.delta_s} | "
+            f"ewma_delta_s_var={sample.ewma_delta_s_var} | "
+            f"ewma_sigma={sample.ewma_sigma} | "
             f"count={self._mid_sample_count}",
         )
 
     def _create_mid_price_sample(self, quote: QuoteTick) -> MidPriceSample:
-        spread = quote.ask_price - quote.bid_price
-        mid = quote.bid_price + spread / 2
+        bid = quote.bid_price.as_decimal()
+        ask = quote.ask_price.as_decimal()
+        spread = ask - bid
+        mid = bid + spread / Decimal("2")
+
+        delta_s: Decimal | None = None
+        if self.config.calculate_ewma_sigma:
+            delta_s = self._update_ewma_sigma(mid)
+
         return MidPriceSample(
             ts_event=quote.ts_event,
             ts_init=quote.ts_init,
@@ -212,7 +238,36 @@ class KaitousdcMonitorStrategy(Strategy):
             ask=str(quote.ask_price),
             mid=str(mid),
             spread=str(spread),
+            delta_s=str(delta_s) if delta_s is not None else None,
+            ewma_delta_s_var=str(self._ewma_delta_s_var)
+            if self._ewma_delta_s_var is not None
+            else None,
+            ewma_sigma=str(self._ewma_sigma) if self._ewma_sigma is not None else None,
         )
+
+    def _update_ewma_sigma(self, mid: Decimal) -> Decimal | None:
+        if self._last_mid is None:
+            self._last_mid = mid
+            return None
+
+        delta_s = mid - self._last_mid
+        delta_s_sq = delta_s * delta_s
+
+        if self._ewma_delta_s_var is None:
+            self._ewma_delta_s_var = delta_s_sq
+        else:
+            lambda_ = Decimal(str(self.config.ewma_lambda))
+            self._ewma_delta_s_var = (
+                lambda_ * self._ewma_delta_s_var
+                + (Decimal("1") - lambda_) * delta_s_sq
+            )
+
+        self._ewma_sigma = (
+            self._ewma_delta_s_var / Decimal(str(self.config.mid_sample_interval_secs))
+        ).sqrt()
+        self._ewma_delta_s_count += 1
+        self._last_mid = mid
+        return delta_s
 
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
@@ -271,6 +326,7 @@ class KaitousdcMonitorStrategy(Strategy):
             + self._bar_count
             + self._book_count
             + self._mid_sample_count
+            + self._ewma_delta_s_count
         )
         self.log.info(
             "Stopped KAITOUSDC monitor | "
@@ -281,5 +337,8 @@ class KaitousdcMonitorStrategy(Strategy):
             f"book_snapshots={self._book_count} | "
             f"mid_samples={self._mid_sample_count} | "
             f"recent_mid_samples={list(self._mid_samples)} | "
+            f"ewma_delta_s_count={self._ewma_delta_s_count} | "
+            f"ewma_delta_s_var={self._ewma_delta_s_var} | "
+            f"ewma_sigma={self._ewma_sigma} | "
             f"received_data={total > 0}",
         )
