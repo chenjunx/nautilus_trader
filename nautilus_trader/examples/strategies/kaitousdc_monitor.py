@@ -13,6 +13,13 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from collections import deque
+from dataclasses import dataclass
+
+import pandas as pd
+
+from nautilus_trader.common.events import TimeEvent
+from nautilus_trader.config import PositiveFloat
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.book import OrderBook
@@ -24,6 +31,20 @@ from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.strategy import Strategy
+
+
+@dataclass(frozen=True)
+class MidPriceSample:
+    """
+    A quote-derived mid price sample.
+    """
+
+    ts_event: int
+    ts_init: int
+    bid: str
+    ask: str
+    mid: str
+    spread: str
 
 
 class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
@@ -46,6 +67,12 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         If order book snapshots should be subscribed at ``book_interval_ms``.
     book_interval_ms : PositiveInt, default 1000
         The interval in milliseconds for order book snapshots.
+    sample_mid : bool, default True
+        If mid price should be sampled from the latest quote on a timer.
+    mid_sample_interval_secs : PositiveFloat, default 2.0
+        The interval in seconds for mid price sampling.
+    mid_sample_history_size : PositiveInt, default 2
+        The number of recent mid price samples to keep in memory.
 
     """
 
@@ -56,6 +83,9 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     subscribe_bars: bool = True
     subscribe_book_snapshots: bool = False
     book_interval_ms: PositiveInt = 1000
+    sample_mid: bool = True
+    mid_sample_interval_secs: PositiveFloat = 2.0
+    mid_sample_history_size: PositiveInt = 2
 
 
 class KaitousdcMonitorStrategy(Strategy):
@@ -72,6 +102,8 @@ class KaitousdcMonitorStrategy(Strategy):
 
     """
 
+    MID_SAMPLE_TIMER_NAME = "mid_price_sample"
+
     def __init__(self, config: KaitousdcMonitorConfig) -> None:
         super().__init__(config)
 
@@ -80,6 +112,11 @@ class KaitousdcMonitorStrategy(Strategy):
         self._trade_count = 0
         self._bar_count = 0
         self._book_count = 0
+        self._last_quote: QuoteTick | None = None
+        self._mid_sample_count = 0
+        self._mid_samples: deque[MidPriceSample] = deque(
+            maxlen=config.mid_sample_history_size,
+        )
 
     def on_start(self) -> None:
         """
@@ -103,6 +140,12 @@ class KaitousdcMonitorStrategy(Strategy):
                 book_type=BookType.L2_MBP,
                 interval_ms=self.config.book_interval_ms,
             )
+        if self.config.sample_mid:
+            self.clock.set_timer(
+                name=self.MID_SAMPLE_TIMER_NAME,
+                interval=pd.Timedelta(seconds=self.config.mid_sample_interval_secs),
+                callback=self.on_timer,
+            )
 
         self.log.info(
             "Started KAITOUSDC monitor | "
@@ -110,7 +153,9 @@ class KaitousdcMonitorStrategy(Strategy):
             f"quotes={self.config.subscribe_quotes} | "
             f"trades={self.config.subscribe_trades} | "
             f"bars={self.config.subscribe_bars and self.config.bar_type is not None} | "
-            f"book_snapshots={self.config.subscribe_book_snapshots}",
+            f"book_snapshots={self.config.subscribe_book_snapshots} | "
+            f"sample_mid={self.config.sample_mid} | "
+            f"mid_sample_interval_secs={self.config.mid_sample_interval_secs}",
         )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -118,6 +163,7 @@ class KaitousdcMonitorStrategy(Strategy):
         Actions to be performed when a quote tick is received.
         """
         self._quote_count += 1
+        self._last_quote = tick
         spread = tick.ask_price - tick.bid_price
         self.log.info(
             "Quote tick | "
@@ -126,6 +172,46 @@ class KaitousdcMonitorStrategy(Strategy):
             f"ask={tick.ask_price} | "
             f"spread={spread} | "
             f"count={self._quote_count}",
+        )
+
+    def on_timer(self, event: TimeEvent) -> None:
+        """
+        Actions to be performed when a timer event is received.
+        """
+        if event.name != self.MID_SAMPLE_TIMER_NAME:
+            return
+
+        if self._last_quote is None:
+            self.log.info(
+                "Mid sample skipped | "
+                f"instrument_id={self.config.instrument_id} | "
+                "reason=no_quote",
+            )
+            return
+
+        sample = self._create_mid_price_sample(self._last_quote)
+        self._mid_samples.append(sample)
+        self._mid_sample_count += 1
+        self.log.info(
+            "Mid sample | "
+            f"instrument_id={self.config.instrument_id} | "
+            f"bid={sample.bid} | "
+            f"ask={sample.ask} | "
+            f"mid={sample.mid} | "
+            f"spread={sample.spread} | "
+            f"count={self._mid_sample_count}",
+        )
+
+    def _create_mid_price_sample(self, quote: QuoteTick) -> MidPriceSample:
+        spread = quote.ask_price - quote.bid_price
+        mid = quote.bid_price + spread / 2
+        return MidPriceSample(
+            ts_event=quote.ts_event,
+            ts_init=quote.ts_init,
+            bid=str(quote.bid_price),
+            ask=str(quote.ask_price),
+            mid=str(mid),
+            spread=str(spread),
         )
 
     def on_trade_tick(self, tick: TradeTick) -> None:
@@ -179,7 +265,13 @@ class KaitousdcMonitorStrategy(Strategy):
         """
         Actions to be performed when the strategy is stopped.
         """
-        total = self._quote_count + self._trade_count + self._bar_count + self._book_count
+        total = (
+            self._quote_count
+            + self._trade_count
+            + self._bar_count
+            + self._book_count
+            + self._mid_sample_count
+        )
         self.log.info(
             "Stopped KAITOUSDC monitor | "
             f"instrument_id={self.config.instrument_id} | "
@@ -187,5 +279,7 @@ class KaitousdcMonitorStrategy(Strategy):
             f"trades={self._trade_count} | "
             f"bars={self._bar_count} | "
             f"book_snapshots={self._book_count} | "
+            f"mid_samples={self._mid_sample_count} | "
+            f"recent_mid_samples={list(self._mid_samples)} | "
             f"received_data={total > 0}",
         )

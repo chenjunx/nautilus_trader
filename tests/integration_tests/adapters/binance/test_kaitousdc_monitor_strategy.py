@@ -38,6 +38,9 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.subscribe_bars is True
     assert config.subscribe_book_snapshots is False
     assert config.book_interval_ms == 1000
+    assert config.sample_mid is True
+    assert config.mid_sample_interval_secs == 2.0
+    assert config.mid_sample_history_size == 2
 
 
 def test_kaitousdc_monitor_config_accepts_explicit_bar_type() -> None:
@@ -67,6 +70,20 @@ def test_kaitousdc_monitor_strategy_initializes_counters() -> None:
     assert strategy._trade_count == 0
     assert strategy._bar_count == 0
     assert strategy._book_count == 0
+    assert strategy._last_quote is None
+    assert strategy._mid_sample_count == 0
+    assert strategy._mid_samples.maxlen == 2
+
+
+def test_kaitousdc_monitor_strategy_defines_mid_sampling_timer() -> None:
+    content = STRATEGY_PATH.read_text(encoding="utf-8")
+
+    assert "MidPriceSample" in content
+    assert "MID_SAMPLE_TIMER_NAME" in content
+    assert 'MID_SAMPLE_TIMER_NAME = "mid_price_sample"' in content
+    assert "clock.set_timer" in content
+    assert "pd.Timedelta(seconds=self.config.mid_sample_interval_secs)" in content
+    assert "def on_timer" in content
 
 
 def test_kaitousdc_monitor_modules_import() -> None:
