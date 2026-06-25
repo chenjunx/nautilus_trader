@@ -99,7 +99,7 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The first positive inventory level to calculate.
     reservation_price_max_q : PositiveInt, default 10
         The final positive inventory level to calculate.
-    quote_intensity_k : PositiveFloat, default 1.5
+    quote_intensity_k : PositiveFloat, default 1831.0
         The order book intensity parameter used in the quote spread formula.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
@@ -130,7 +130,7 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     reservation_price_horizon: PositiveFloat = 150.0
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
-    quote_intensity_k: PositiveFloat = 1.5
+    quote_intensity_k: PositiveFloat = 1831.0
     persist_market_data: bool = True
     catalog_path: str = "data/kaitousdc/catalog"
     flush_interval_secs: PositiveFloat = 5.0
