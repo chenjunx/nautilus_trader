@@ -15,6 +15,9 @@
 
 from collections import deque
 from dataclasses import dataclass
+from decimal import ROUND_CEILING
+from decimal import ROUND_FLOOR
+from decimal import ROUND_HALF_UP
 from decimal import Decimal
 import time
 
@@ -363,7 +366,12 @@ class KaitousdcMonitorStrategy(Strategy):
         horizon = Decimal(str(self.config.reservation_price_horizon))
         lot = self.config.lot_size
         return {
-            q * lot: str(mid - Decimal(q * lot) * gamma * self._ewma_delta_s_var * horizon)
+            q * lot: str(
+                self._round_to_tick(
+                    mid - Decimal(q * lot) * gamma * self._ewma_delta_s_var * horizon,
+                    ROUND_HALF_UP,
+                )
+            )
             for q in range(
                 self.config.reservation_price_min_q,
                 self.config.reservation_price_max_q + 1,
@@ -391,11 +399,45 @@ class KaitousdcMonitorStrategy(Strategy):
         return {
             q: {
                 "reservation_price": reservation_price,
-                "bid": str(Decimal(reservation_price) - half_spread),
-                "ask": str(Decimal(reservation_price) + half_spread),
+                # Snap bid down / ask up to the tick grid so the realized spread
+                # never narrows below the theoretical one due to rounding.
+                "bid": str(
+                    self._round_to_tick(
+                        Decimal(reservation_price) - half_spread,
+                        ROUND_FLOOR,
+                    )
+                ),
+                "ask": str(
+                    self._round_to_tick(
+                        Decimal(reservation_price) + half_spread,
+                        ROUND_CEILING,
+                    )
+                ),
             }
             for q, reservation_price in self._reservation_prices.items()
         }
+
+    def _round_to_tick(self, price: Decimal, rounding: str) -> Decimal:
+        """
+        Round a price onto the instrument tick grid.
+
+        Uses ``self.instrument.price_increment`` as the grid spacing and applies
+        the given decimal rounding mode (e.g. ``ROUND_FLOOR`` for bids,
+        ``ROUND_CEILING`` for asks, ``ROUND_HALF_UP`` for reservation prices).
+
+        When the instrument or its price increment is unavailable, the price is
+        returned unchanged so callers fall back to the raw Decimal.
+
+        """
+        if self.instrument is None:
+            return price
+
+        tick = self.instrument.price_increment.as_decimal()
+        if tick <= 0:
+            return price
+
+        ticks = (price / tick).to_integral_value(rounding=rounding)
+        return ticks * tick
 
     def _flush_market_data_if_needed(self) -> None:
         if not self.config.persist_market_data:
