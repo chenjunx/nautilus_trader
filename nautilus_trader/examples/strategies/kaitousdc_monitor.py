@@ -95,10 +95,15 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The risk aversion coefficient used for reservation prices.
     reservation_price_horizon : PositiveFloat, default 150.0
         The horizon/multiplier used for reservation prices.
+    lot_size : PositiveInt, default 11
+        The number of units per lot (one 手). Inventory levels are always multiples
+        of this value; ``reservation_price_min_q`` and ``reservation_price_max_q``
+        are expressed in lots, so the actual quantities used are
+        ``min_q * lot_size`` … ``max_q * lot_size``.
     reservation_price_min_q : PositiveInt, default 1
-        The first positive inventory level to calculate.
+        The first positive lot count to calculate (actual qty = min_q * lot_size).
     reservation_price_max_q : PositiveInt, default 10
-        The final positive inventory level to calculate.
+        The final positive lot count to calculate (actual qty = max_q * lot_size).
     quote_intensity_k : PositiveFloat, default 1831.0
         The order book intensity parameter used in the quote spread formula.
     persist_market_data : bool, default True
@@ -128,6 +133,7 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     ewma_lambda: PositiveFloat = 0.94
     reservation_price_gamma: PositiveFloat = 0.1
     reservation_price_horizon: PositiveFloat = 150.0
+    lot_size: PositiveInt = 11
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
     quote_intensity_k: PositiveFloat = 1831.0
@@ -240,6 +246,7 @@ class KaitousdcMonitorStrategy(Strategy):
             f"ewma_lambda={self.config.ewma_lambda} | "
             f"reservation_price_gamma={self.config.reservation_price_gamma} | "
             f"reservation_price_horizon={self.config.reservation_price_horizon} | "
+            f"lot_size={self.config.lot_size} | "
             f"reservation_price_min_q={self.config.reservation_price_min_q} | "
             f"reservation_price_max_q={self.config.reservation_price_max_q} | "
             f"quote_intensity_k={self.config.quote_intensity_k} | "
@@ -354,8 +361,9 @@ class KaitousdcMonitorStrategy(Strategy):
 
         gamma = Decimal(str(self.config.reservation_price_gamma))
         horizon = Decimal(str(self.config.reservation_price_horizon))
+        lot = self.config.lot_size
         return {
-            q: str(mid - Decimal(q) * gamma * self._ewma_delta_s_var * horizon)
+            q * lot: str(mid - Decimal(q * lot) * gamma * self._ewma_delta_s_var * horizon)
             for q in range(
                 self.config.reservation_price_min_q,
                 self.config.reservation_price_max_q + 1,
