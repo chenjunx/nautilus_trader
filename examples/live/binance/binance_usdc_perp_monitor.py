@@ -37,12 +37,17 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
 
 
-SYMBOLS = [
-    "KAITOUSDC-PERP",
-    "SOLUSDC-PERP",
-    "ETHUSDC-PERP",
-    "NEARUSDC-PERP",
-]
+# Per-symbol GLFT parameters fitted from ~4.8 h of live LOB + trade data (2026-06-28).
+# quote_arrival_a (A) and quote_intensity_k (k) follow λ(δ) = A·exp(−k·δ).
+# KAITOUSDC has no fitted data yet; defaults (A=1, k=1831) are placeholders.
+GLFT_PARAMS: dict[str, dict] = {
+    "KAITOUSDC-PERP": {"quote_arrival_a": 1.0,     "quote_intensity_k": 1831.0},
+    "SOLUSDC-PERP":   {"quote_arrival_a": 34.33,   "quote_intensity_k": 111.70},
+    "ETHUSDC-PERP":   {"quote_arrival_a": 43.59,   "quote_intensity_k": 15.81},
+    "NEARUSDC-PERP":  {"quote_arrival_a": 15.31,   "quote_intensity_k": 480.51},
+}
+
+SYMBOLS = list(GLFT_PARAMS)
 
 instrument_ids = [InstrumentId.from_str(f"{s}.BINANCE") for s in SYMBOLS]
 
@@ -69,8 +74,10 @@ node = TradingNode(config=config_node)
 
 # Add one monitor strategy per symbol.
 for instrument_id in instrument_ids:
-    symbol = instrument_id.symbol.value.replace("-PERP", "").lower()
+    sym_key = instrument_id.symbol.value          # e.g. "ETHUSDC-PERP"
+    sym_dir = sym_key.replace("-PERP", "").lower()  # e.g. "ethusdc"
     bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
+    params = GLFT_PARAMS[sym_key]
     node.trader.add_strategy(
         GLFTMarketMaker(
             config=GLFTMarketMakerConfig(
@@ -79,9 +86,11 @@ for instrument_id in instrument_ids:
                 subscribe_book_deltas=True,
                 book_depth=100,
                 persist_market_data=True,
-                catalog_path=f"data/{symbol}/catalog",
+                catalog_path=f"data/{sym_dir}/catalog",
                 flush_interval_secs=5.0,
                 max_buffer_size=10_000,
+                quote_arrival_a=params["quote_arrival_a"],
+                quote_intensity_k=params["quote_intensity_k"],
             ),
         )
     )

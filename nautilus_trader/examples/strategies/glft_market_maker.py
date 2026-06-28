@@ -116,7 +116,11 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     reservation_price_max_q : PositiveInt, default 10
         The final positive lot count to calculate (actual qty = max_q * lot_size).
     quote_intensity_k : PositiveFloat, default 1831.0
-        The order book intensity parameter used in the quote spread formula.
+        The order book depth/decay parameter (k) in the GLFT formula.
+    quote_arrival_a : PositiveFloat, default 1.0
+        The market-order arrival rate scaling parameter (A) in the GLFT formula.
+        With A=1 the formula reduces to the symmetric base case; increase A to
+        widen c (and thus spreads) when arrival rates are higher than assumed.
     max_position : PositiveInt, default 110
         The maximum long inventory (in raw units) before buy quotes are
         suppressed. When the tracked net position reaches this cap, only sell
@@ -164,6 +168,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
     quote_intensity_k: PositiveFloat = 1831.0
+    quote_arrival_a: PositiveFloat = 1.0
     max_position: PositiveInt = 110
     enable_trading: bool = False
     trade_size: PositiveInt | None = None
@@ -459,7 +464,7 @@ class GLFTMarketMaker(Strategy):
 
     def _calculate_g(self) -> Decimal | None:
         """
-        GLFT half-step g = sqrt(γσ²/(2k) · (1+γ/k)^(1+k/γ)).
+        GLFT c = sqrt(σ²γ/(2kA) · (1+γ/k)^(1+k/γ)).
 
         Used as the per-unit reservation-price adjustment and as the first term
         of the total spread.  Returns None until the EWMA variance is seeded.
@@ -469,9 +474,10 @@ class GLFTMarketMaker(Strategy):
 
         gamma = Decimal(str(self.config.reservation_price_gamma))
         k = Decimal(str(self.config.quote_intensity_k))
+        a = Decimal(str(self.config.quote_arrival_a))
         ratio = gamma / k
         exponent = Decimal("1") + k / gamma
-        g_sq = (gamma * self._ewma_delta_s_var / (Decimal("2") * k)) * (
+        g_sq = (gamma * self._ewma_delta_s_var / (Decimal("2") * k * a)) * (
             Decimal("1") + ratio
         ) ** exponent
         return g_sq.sqrt()
