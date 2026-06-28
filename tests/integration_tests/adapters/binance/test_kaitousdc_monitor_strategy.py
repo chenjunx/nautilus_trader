@@ -24,6 +24,7 @@ INSTRUMENT_ID = InstrumentId.from_str("KAITOUSDC-PERP.BINANCE")
 BAR_TYPE = BarType.from_str("KAITOUSDC-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL")
 STRATEGY_PATH = Path("nautilus_trader/examples/strategies/kaitousdc_monitor.py")
 RUNNER_PATH = Path("examples/live/binance/binance_kaitousdc_monitor.py")
+LIVE_RUNNER_PATH = Path("examples/live/binance/binance_kaitousdc_live.py")
 
 
 def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
@@ -49,7 +50,10 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.reservation_price_horizon == 150.0
     assert config.reservation_price_min_q == 1
     assert config.reservation_price_max_q == 10
-    assert config.quote_intensity_k == 1.5
+    assert config.quote_intensity_k == 1831.0
+    assert config.max_position == 110
+    assert config.enable_trading is False
+    assert config.trade_size is None
     assert config.persist_market_data is True
     assert config.catalog_path == "data/kaitousdc/catalog"
     assert config.flush_interval_secs == 5.0
@@ -97,6 +101,9 @@ def test_kaitousdc_monitor_strategy_initializes_counters() -> None:
     assert strategy._reservation_prices is None
     assert strategy._quote_spread is None
     assert strategy._quote_prices is None
+    assert strategy._position == 0
+    assert strategy._trade_size is None
+    assert strategy._pending_self_cancels == set()
 
 
 def test_kaitousdc_monitor_strategy_defines_mid_sampling_timer() -> None:
@@ -127,6 +134,15 @@ def test_kaitousdc_monitor_strategy_defines_variance_reservation_and_quote_field
     assert "reservation_price_max_q" in content
     assert "reservation_prices" in content
     assert "quote_intensity_k" in content
+    assert "max_position" in content
+    assert "enable_trading" in content
+    assert "trade_size" in content
+    assert "_position" in content
+    assert "_update_position" in content
+    assert "_reservation_price_for" in content
+    assert "_requote_live" in content
+    assert "_pending_self_cancels" in content
+    assert "post_only=True" in content
     assert "_quote_spread" in content
     assert "_quote_prices" in content
     assert "quote_spread" in content
@@ -154,6 +170,7 @@ def test_kaitousdc_monitor_strategy_defines_market_data_persistence() -> None:
 def test_kaitousdc_monitor_modules_import() -> None:
     importlib.import_module("nautilus_trader.examples.strategies.kaitousdc_monitor")
     importlib.import_module("examples.live.binance.binance_kaitousdc_monitor")
+    importlib.import_module("examples.live.binance.binance_kaitousdc_live")
 
 
 def test_kaitousdc_monitor_runner_targets_binance_usdt_futures_data_only() -> None:
@@ -179,16 +196,29 @@ def test_kaitousdc_monitor_runner_targets_binance_usdt_futures_data_only() -> No
     assert "BinanceLiveExecClientFactory" not in content
 
 
-def test_kaitousdc_monitor_strategy_contains_no_trading_actions() -> None:
+def test_kaitousdc_monitor_strategy_trading_is_gated_behind_enable_trading() -> None:
+    # The strategy can now trade (post-only market maker), but every trading
+    # action is gated behind `enable_trading`, which defaults to False so the
+    # data-only runner and monitor-only usage stay inert.
     content = STRATEGY_PATH.read_text(encoding="utf-8")
 
-    forbidden = [
-        "submit_order",
-        "submit_order_list",
-        "cancel_order",
-        "cancel_all_orders",
-        "close_position",
-        "close_all_positions",
-    ]
-    for token in forbidden:
-        assert token not in content
+    for token in ["submit_order", "cancel_all_orders", "close_all_positions"]:
+        assert token in content
+    assert "if self.config.enable_trading" in content
+    assert "def _requote_live" in content
+
+
+def test_kaitousdc_live_runner_configures_exec_client() -> None:
+    content = LIVE_RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert 'symbol = "KAITOUSDC-PERP"' in content
+    assert "BinanceAccountType.USDT_FUTURES" in content
+    assert "BinanceEnvironment.LIVE" in content
+    assert "BinanceExecClientConfig" in content
+    assert "BinanceLiveExecClientFactory" in content
+    assert "node.add_exec_client_factory(BINANCE, BinanceLiveExecClientFactory)" in content
+    assert "futures_leverages" in content
+    assert "use_reduce_only=True" in content
+    # Live trading opt-ins on the strategy config
+    assert "enable_trading=True" in content
+    assert "external_order_claims=[instrument_id]" in content

@@ -35,8 +35,17 @@ from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.events import OrderCanceled
+from nautilus_trader.model.events import OrderExpired
+from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.events import OrderRejected
+from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.trading.strategy import Strategy
 
@@ -57,7 +66,8 @@ class MidPriceSample:
     ewma_delta_s_var: str | None
     reservation_prices: dict[int, str] | None
     quote_spread: str | None
-    quote_prices: dict[int, dict[str, str]] | None
+    quote_prices: dict[int, dict[str, str | None]] | None
+    position: str
 
 
 class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
@@ -109,6 +119,23 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
         The final positive lot count to calculate (actual qty = max_q * lot_size).
     quote_intensity_k : PositiveFloat, default 1831.0
         The order book intensity parameter used in the quote spread formula.
+    max_position : PositiveInt, default 110
+        The maximum long inventory (in raw units) before buy quotes are
+        suppressed. When the tracked net position reaches this cap, only sell
+        (ask) quotes are emitted so inventory is drawn back down. The cap is
+        one-directional (long only); the short side is never capped. Defaults
+        to ``reservation_price_max_q * lot_size`` (10 * 11 = 110).
+    enable_trading : bool, default False
+        Safety kill-switch. When ``False`` (default) the strategy is
+        monitoring-only and never submits, cancels, or closes orders — so it
+        stays inert without an execution client and the data-only runner keeps
+        working. When ``True`` it places post-only bid/ask limit orders on each
+        mid sample, gated by ``max_position``.
+    trade_size : PositiveInt, optional
+        The per-order quantity (raw units) used when ``enable_trading`` is
+        ``True``. If ``None`` (default) it resolves to ``lot_size`` so each
+        quote is one lot and each fill moves inventory by one lot, matching the
+        reservation-price grid.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
     catalog_path : str, default "data/kaitousdc/catalog"
@@ -140,6 +167,9 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
     quote_intensity_k: PositiveFloat = 1831.0
+    max_position: PositiveInt = 110
+    enable_trading: bool = False
+    trade_size: PositiveInt | None = None
     persist_market_data: bool = True
     catalog_path: str = "data/kaitousdc/catalog"
     flush_interval_secs: PositiveFloat = 5.0
@@ -148,11 +178,18 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
 
 class KaitousdcMonitorStrategy(Strategy):
     """
-    A data-only Binance futures monitor for ``KAITOUSDC-PERP``.
+    A Binance futures monitor / market maker for ``KAITOUSDC-PERP``.
 
     The strategy subscribes to configured market data streams, logs received
-    data with simple counters, and persists trade ticks and order book deltas.
-    It is intentionally monitoring-only.
+    data with simple counters, persists trade ticks and order book deltas, and
+    on a timer computes an Avellaneda-Stoikov quote (reservation prices,
+    spread, bid/ask per inventory level).
+
+    It is monitoring-only by default. With ``enable_trading=True`` it also
+    places post-only bid/ask limit orders around the reservation price for the
+    current net inventory on each sample, cancelling and replacing them every
+    cycle. A one-directional ``max_position`` long cap suppresses the buy leg
+    once inventory reaches the cap.
 
     Parameters
     ----------
@@ -187,7 +224,10 @@ class KaitousdcMonitorStrategy(Strategy):
         self._ewma_delta_s_count = 0
         self._reservation_prices: dict[int, str] | None = None
         self._quote_spread: str | None = None
-        self._quote_prices: dict[int, dict[str, str]] | None = None
+        self._quote_prices: dict[int, dict[str, str | None]] | None = None
+        self._position: Decimal = Decimal(0)
+        self._trade_size: Quantity | None = None
+        self._pending_self_cancels: set[ClientOrderId] = set()
 
     def on_start(self) -> None:
         """
@@ -198,6 +238,23 @@ class KaitousdcMonitorStrategy(Strategy):
             self.log.error(f"Could not find instrument for {self.config.instrument_id}")
             self.stop()
             return
+
+        if self.config.enable_trading:
+            try:
+                self._trade_size = self.instrument.make_qty(
+                    self.config.trade_size
+                    if self.config.trade_size is not None
+                    else self.config.lot_size,
+                )
+            except ValueError as e:
+                self.log.error(
+                    f"Invalid trade_size/lot_size for {self.config.instrument_id}: {e}",
+                )
+                self.stop()
+                return
+            self.log.info(f"Trading ENABLED | trade_size={self._trade_size}")
+        else:
+            self.log.info("Trading DISABLED (monitor-only)")
 
         if self.config.persist_market_data:
             self._catalog = ParquetDataCatalog(self.config.catalog_path)
@@ -253,6 +310,9 @@ class KaitousdcMonitorStrategy(Strategy):
             f"reservation_price_min_q={self.config.reservation_price_min_q} | "
             f"reservation_price_max_q={self.config.reservation_price_max_q} | "
             f"quote_intensity_k={self.config.quote_intensity_k} | "
+            f"max_position={self.config.max_position} | "
+            f"enable_trading={self.config.enable_trading} | "
+            f"trade_size={self._trade_size} | "
             f"persist_market_data={self.config.persist_market_data} | "
             f"catalog_path={self.config.catalog_path} | "
             f"flush_interval_secs={self.config.flush_interval_secs} | "
@@ -305,10 +365,50 @@ class KaitousdcMonitorStrategy(Strategy):
             f"reservation_prices={sample.reservation_prices} | "
             f"quote_spread={sample.quote_spread} | "
             f"quote_prices={sample.quote_prices} | "
+            f"position={sample.position} | "
             f"count={self._mid_sample_count}",
         )
 
+        if self.config.enable_trading:
+            self._requote_live()
+
+    def on_order_filled(self, event: OrderFilled) -> None:
+        """
+        Actions to be performed when an order is filled.
+        """
+        # Only drop the self-cancel tag once fully filled; a partially filled
+        # order must stay tagged so a later self-cancel isn't misread as
+        # external.
+        order = self.cache.order(event.client_order_id)
+        if order is not None and order.is_closed:
+            self._pending_self_cancels.discard(event.client_order_id)
+
+    def on_order_canceled(self, event: OrderCanceled) -> None:
+        """
+        Actions to be performed when an order is canceled.
+        """
+        if event.client_order_id in self._pending_self_cancels:
+            self._pending_self_cancels.discard(event.client_order_id)
+            return
+        # External cancel: nothing to do; the next timer tick re-quotes anyway.
+
+    def on_order_expired(self, event: OrderExpired) -> None:
+        """
+        Actions to be performed when an order expires.
+
+        Binance reports a post-only order that would cross as EXPIRED (not
+        CANCELED), so this handler also drains the self-cancel tag.
+        """
+        self._pending_self_cancels.discard(event.client_order_id)
+
+    def on_order_rejected(self, event: OrderRejected) -> None:
+        """
+        Actions to be performed when an order is rejected.
+        """
+        self._pending_self_cancels.discard(event.client_order_id)
+
     def _create_mid_price_sample(self, quote: QuoteTick) -> MidPriceSample:
+        self._update_position()
         bid = quote.bid_price.as_decimal()
         ask = quote.ask_price.as_decimal()
         spread = ask - bid
@@ -335,6 +435,7 @@ class KaitousdcMonitorStrategy(Strategy):
             reservation_prices=self._reservation_prices,
             quote_spread=self._quote_spread,
             quote_prices=self._quote_prices,
+            position=str(self._position),
         )
 
     def _update_ewma_delta_s_var(self, mid: Decimal) -> Decimal | None:
@@ -378,6 +479,27 @@ class KaitousdcMonitorStrategy(Strategy):
             )
         }
 
+    def _reservation_price_for(
+        self,
+        mid: Decimal,
+        q_raw_signed: Decimal,
+    ) -> Decimal | None:
+        """
+        Reservation price for an arbitrary signed inventory level (raw units).
+
+        Same Avellaneda-Stoikov formula as :meth:`_calculate_reservation_prices`
+        (``mid - q * gamma * sigma2 * horizon``) but generalized to any signed
+        ``q`` (including zero and negative), so live quoting can key off the
+        current net position rather than only the positive-lot lookup table.
+        """
+        if self._ewma_delta_s_var is None:
+            return None
+
+        gamma = Decimal(str(self.config.reservation_price_gamma))
+        horizon = Decimal(str(self.config.reservation_price_horizon))
+        reservation = mid - q_raw_signed * gamma * self._ewma_delta_s_var * horizon
+        return self._round_to_tick(reservation, ROUND_HALF_UP)
+
     def _calculate_quote_spread(self) -> str | None:
         if self._ewma_delta_s_var is None:
             return None
@@ -391,31 +513,155 @@ class KaitousdcMonitorStrategy(Strategy):
         )
         return str(total_spread)
 
-    def _calculate_quote_prices(self) -> dict[int, dict[str, str]] | None:
+    def _calculate_quote_prices(self) -> dict[int, dict[str, str | None]] | None:
         if self._reservation_prices is None or self._quote_spread is None:
             return None
 
         half_spread = Decimal(self._quote_spread) / Decimal("2")
-        return {
-            q: {
+        # One-directional long cap: at or above max_position the strategy is
+        # fully long, so buy (bid) quotes are suppressed and only sell (ask)
+        # quotes are emitted to draw inventory back down. The short side is
+        # never capped.
+        suppress_bid = self._position >= Decimal(self.config.max_position)
+        quote_prices: dict[int, dict[str, str | None]] = {}
+        for q, reservation_price in self._reservation_prices.items():
+            # Snap bid down / ask up to the tick grid so the realized spread
+            # never narrows below the theoretical one due to rounding.
+            quote_prices[q] = {
                 "reservation_price": reservation_price,
-                # Snap bid down / ask up to the tick grid so the realized spread
-                # never narrows below the theoretical one due to rounding.
-                "bid": str(
-                    self._round_to_tick(
-                        Decimal(reservation_price) - half_spread,
-                        ROUND_FLOOR,
+                "bid": (
+                    str(
+                        self._round_to_tick(
+                            Decimal(reservation_price) - half_spread,
+                            ROUND_FLOOR,
+                        ),
                     )
+                    if not suppress_bid
+                    else None
                 ),
                 "ask": str(
                     self._round_to_tick(
                         Decimal(reservation_price) + half_spread,
                         ROUND_CEILING,
-                    )
+                    ),
                 ),
             }
-            for q, reservation_price in self._reservation_prices.items()
-        }
+        return quote_prices
+
+    def _update_position(self) -> None:
+        """
+        Refresh the tracked net position for this strategy from the cache.
+
+        Read-only and monitor-safe: it never submits, cancels, or closes
+        orders. Scoped to this strategy's own positions. Under Binance USDT
+        futures (HEDGING OMS) a LONG and SHORT position can coexist, so the
+        signed quantities are summed for the net. In a pure data-only node
+        (no execution client) there are no positions, so the tracked position
+        stays at zero and the ``max_position`` gate never trips; the moment a
+        real fill exists it is reflected automatically.
+        """
+        net = Decimal(0)
+        for pos in self.cache.positions_open(
+            instrument_id=self.config.instrument_id,
+            strategy_id=self.id,
+        ):
+            qty = Decimal(str(pos.quantity))
+            net += qty if pos.signed_qty > 0 else -qty
+        self._position = net
+
+    def _requote_live(self) -> None:
+        """
+        Refresh the post-only bid/ask quotes for the current inventory.
+
+        Computes the reservation price for the current net position, cancels
+        all resting orders, then places a sell (ask) and — subject to the
+        one-directional ``max_position`` long cap — a buy (bid), each post-only
+        GTC at one lot. Called from ``on_timer`` only when ``enable_trading``
+        is True. ``self._position`` is refreshed earlier in the same tick by
+        :meth:`_create_mid_price_sample`.
+        """
+        if (
+            self.instrument is None
+            or self._trade_size is None
+            or self._ewma_delta_s_var is None
+            or self._last_quote is None
+        ):
+            return
+
+        instrument_id = self.config.instrument_id
+        bid_dec = self._last_quote.bid_price.as_decimal()
+        ask_dec = self._last_quote.ask_price.as_decimal()
+        mid = bid_dec + (ask_dec - bid_dec) / Decimal("2")
+
+        reservation = self._reservation_price_for(mid, self._position)
+        spread_str = self._calculate_quote_spread()
+        if reservation is None or spread_str is None:
+            return
+        half_spread = Decimal(spread_str) / Decimal("2")
+
+        # Min-spread guard: if the modelled half-spread is below one tick the
+        # snapped bid/ask would land on (or cross) the mid and Binance would
+        # reject the post-only order every cycle (rate-limit risk). Wait until
+        # the volatility estimate (sigma2) grows before quoting.
+        tick = self.instrument.price_increment.as_decimal()
+        if half_spread < tick:
+            self.log.warning(
+                "Skip requote | half_spread < tick | "
+                f"half_spread={half_spread} | tick={tick}",
+            )
+            return
+
+        bid_raw = reservation - half_spread
+        ask_raw = reservation + half_spread
+        trade_size = Decimal(str(self._trade_size))
+        max_position = Decimal(self.config.max_position)
+
+        # Record resting/inflight order IDs as self-cancels before the async
+        # cancel_all_orders sweep so the resulting OrderCanceled/OrderExpired
+        # events are recognised as our own; also accumulate worst-case long
+        # exposure (canceled BUYs still count until the venue acks).
+        pending_buy = Decimal(0)
+        for order in (
+            *self.cache.orders_open(instrument_id=instrument_id, strategy_id=self.id),
+            *self.cache.orders_inflight(instrument_id=instrument_id, strategy_id=self.id),
+        ):
+            self._pending_self_cancels.add(order.client_order_id)
+            if order.side == OrderSide.BUY:
+                pending_buy += Decimal(str(order.leaves_qty))
+        self.cancel_all_orders(instrument_id)
+
+        # SELL (ask) is never capped (one-directional long cap).
+        ask_order = self.order_factory.limit(
+            instrument_id=instrument_id,
+            order_side=OrderSide.SELL,
+            quantity=self._trade_size,
+            price=self.instrument.make_price(
+                self._round_to_tick(ask_raw, ROUND_CEILING),
+            ),
+            time_in_force=TimeInForce.GTC,
+            post_only=True,
+        )
+        self.submit_order(ask_order)
+
+        # BUY (bid) only if the worst-case long exposure stays within the cap.
+        if self._position + pending_buy + trade_size <= max_position:
+            bid_order = self.order_factory.limit(
+                instrument_id=instrument_id,
+                order_side=OrderSide.BUY,
+                quantity=self._trade_size,
+                price=self.instrument.make_price(
+                    self._round_to_tick(bid_raw, ROUND_FLOOR),
+                ),
+                time_in_force=TimeInForce.GTC,
+                post_only=True,
+            )
+            self.submit_order(bid_order)
+        else:
+            self.log.info(
+                "BUY suppressed | at max_position | "
+                f"position={self._position} | pending_buy={pending_buy} | "
+                f"trade_size={trade_size} | max_position={max_position}",
+            )
 
     def _round_to_tick(self, price: Decimal, rounding: str) -> Decimal:
         """
@@ -550,6 +796,11 @@ class KaitousdcMonitorStrategy(Strategy):
         """
         Actions to be performed when the strategy is stopped.
         """
+        if self.config.enable_trading and self.instrument is not None:
+            self.cancel_all_orders(self.config.instrument_id)
+            # reduce_only defaults to True; requires the Binance account to be
+            # in one-way position mode (fails on connect under Hedge mode).
+            self.close_all_positions(self.config.instrument_id)
         self._flush_market_data()
         total = (
             self._quote_count
@@ -577,5 +828,6 @@ class KaitousdcMonitorStrategy(Strategy):
             f"reservation_prices={self._reservation_prices} | "
             f"quote_spread={self._quote_spread} | "
             f"quote_prices={self._quote_prices} | "
+            f"position={self._position} | "
             f"received_data={total > 0}",
         )
