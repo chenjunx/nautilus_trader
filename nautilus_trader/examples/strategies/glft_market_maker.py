@@ -70,9 +70,9 @@ class MidPriceSample:
     position: str
 
 
-class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
+class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     """
-    Configuration for ``KaitousdcMonitorStrategy`` instances.
+    Configuration for ``GLFTMarketMaker`` instances.
 
     Parameters
     ----------
@@ -105,9 +105,7 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     ewma_lambda : PositiveFloat, default 0.94
         The EWMA decay factor for squared mid price increments.
     reservation_price_gamma : PositiveFloat, default 0.1
-        The risk aversion coefficient used for reservation prices.
-    reservation_price_horizon : PositiveFloat, default 150.0
-        The horizon/multiplier used for reservation prices.
+        The risk aversion coefficient (γ) in the GLFT formula.
     lot_size : PositiveInt, default 11
         The number of units per lot (one 手). Inventory levels are always multiples
         of this value; ``reservation_price_min_q`` and ``reservation_price_max_q``
@@ -162,7 +160,6 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     calculate_ewma_variance: bool = True
     ewma_lambda: PositiveFloat = 0.94
     reservation_price_gamma: PositiveFloat = 0.1
-    reservation_price_horizon: PositiveFloat = 150.0
     lot_size: PositiveInt = 11
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
@@ -176,9 +173,9 @@ class KaitousdcMonitorConfig(StrategyConfig, frozen=True):
     max_buffer_size: PositiveInt = 10_000
 
 
-class KaitousdcMonitorStrategy(Strategy):
+class GLFTMarketMaker(Strategy):
     """
-    A Binance futures monitor / market maker for ``KAITOUSDC-PERP``.
+    A GLFT (Guéant-Lehalle-Fernandez-Tapia) market maker for ``KAITOUSDC-PERP``.
 
     The strategy subscribes to configured market data streams, logs received
     data with simple counters, persists trade ticks and order book deltas, and
@@ -193,14 +190,14 @@ class KaitousdcMonitorStrategy(Strategy):
 
     Parameters
     ----------
-    config : KaitousdcMonitorConfig
+    config : GLFTMarketMakerConfig
         The configuration for the instance.
 
     """
 
     MID_SAMPLE_TIMER_NAME = "mid_price_sample"
 
-    def __init__(self, config: KaitousdcMonitorConfig) -> None:
+    def __init__(self, config: GLFTMarketMakerConfig) -> None:
         super().__init__(config)
 
         self.instrument: Instrument | None = None
@@ -292,7 +289,7 @@ class KaitousdcMonitorStrategy(Strategy):
             )
 
         self.log.info(
-            "Started KAITOUSDC monitor | "
+            "Started GLFT market maker | "
             f"instrument_id={self.config.instrument_id} | "
             f"quotes={self.config.subscribe_quotes} | "
             f"trades={self.config.subscribe_trades} | "
@@ -305,7 +302,6 @@ class KaitousdcMonitorStrategy(Strategy):
             f"calculate_ewma_variance={self.config.calculate_ewma_variance} | "
             f"ewma_lambda={self.config.ewma_lambda} | "
             f"reservation_price_gamma={self.config.reservation_price_gamma} | "
-            f"reservation_price_horizon={self.config.reservation_price_horizon} | "
             f"lot_size={self.config.lot_size} | "
             f"reservation_price_min_q={self.config.reservation_price_min_q} | "
             f"reservation_price_max_q={self.config.reservation_price_max_q} | "
@@ -416,10 +412,12 @@ class KaitousdcMonitorStrategy(Strategy):
 
         delta_s: Decimal | None = None
         if self.config.calculate_ewma_variance:
+            prev_var = self._ewma_delta_s_var
             delta_s = self._update_ewma_delta_s_var(mid)
-            self._reservation_prices = self._calculate_reservation_prices(mid)
-            self._quote_spread = self._calculate_quote_spread()
-            self._quote_prices = self._calculate_quote_prices()
+            if self._ewma_delta_s_var != prev_var:
+                self._reservation_prices = self._calculate_reservation_prices(mid)
+                self._quote_spread = self._calculate_quote_spread()
+                self._quote_prices = self._calculate_quote_prices()
 
         return MidPriceSample(
             ts_event=quote.ts_event,
@@ -459,17 +457,35 @@ class KaitousdcMonitorStrategy(Strategy):
         self._last_mid = mid
         return delta_s
 
-    def _calculate_reservation_prices(self, mid: Decimal) -> dict[int, str] | None:
+    def _calculate_g(self) -> Decimal | None:
+        """
+        GLFT half-step g = sqrt(γσ²/(2k) · (1+γ/k)^(1+k/γ)).
+
+        Used as the per-unit reservation-price adjustment and as the first term
+        of the total spread.  Returns None until the EWMA variance is seeded.
+        """
         if self._ewma_delta_s_var is None:
             return None
 
         gamma = Decimal(str(self.config.reservation_price_gamma))
-        horizon = Decimal(str(self.config.reservation_price_horizon))
+        k = Decimal(str(self.config.quote_intensity_k))
+        ratio = gamma / k
+        exponent = Decimal("1") + k / gamma
+        g_sq = (gamma * self._ewma_delta_s_var / (Decimal("2") * k)) * (
+            Decimal("1") + ratio
+        ) ** exponent
+        return g_sq.sqrt()
+
+    def _calculate_reservation_prices(self, mid: Decimal) -> dict[int, str] | None:
+        g = self._calculate_g()
+        if g is None:
+            return None
+
         lot = self.config.lot_size
         return {
             q * lot: str(
                 self._round_to_tick(
-                    mid - Decimal(q * lot) * gamma * self._ewma_delta_s_var * horizon,
+                    mid - Decimal(q * lot) * g,
                     ROUND_HALF_UP,
                 )
             )
@@ -487,30 +503,25 @@ class KaitousdcMonitorStrategy(Strategy):
         """
         Reservation price for an arbitrary signed inventory level (raw units).
 
-        Same Avellaneda-Stoikov formula as :meth:`_calculate_reservation_prices`
-        (``mid - q * gamma * sigma2 * horizon``) but generalized to any signed
-        ``q`` (including zero and negative), so live quoting can key off the
-        current net position rather than only the positive-lot lookup table.
+        GLFT formula: r = mid - q·g, where g is the per-unit price adjustment
+        from :meth:`_calculate_g`.  Accepts any signed ``q`` (including zero
+        and negative) so live quoting can key off the current net position.
         """
-        if self._ewma_delta_s_var is None:
+        g = self._calculate_g()
+        if g is None:
             return None
 
-        gamma = Decimal(str(self.config.reservation_price_gamma))
-        horizon = Decimal(str(self.config.reservation_price_horizon))
-        reservation = mid - q_raw_signed * gamma * self._ewma_delta_s_var * horizon
+        reservation = mid - q_raw_signed * g
         return self._round_to_tick(reservation, ROUND_HALF_UP)
 
     def _calculate_quote_spread(self) -> str | None:
-        if self._ewma_delta_s_var is None:
+        g = self._calculate_g()
+        if g is None:
             return None
 
         gamma = Decimal(str(self.config.reservation_price_gamma))
-        horizon = Decimal(str(self.config.reservation_price_horizon))
         k = Decimal(str(self.config.quote_intensity_k))
-        total_spread = (
-            gamma * self._ewma_delta_s_var * horizon
-            + (Decimal("2") / gamma) * (Decimal("1") + gamma / k).ln()
-        )
+        total_spread = g + (Decimal("2") / gamma) * (Decimal("1") + gamma / k).ln()
         return str(total_spread)
 
     def _calculate_quote_prices(self) -> dict[int, dict[str, str | None]] | None:
@@ -705,13 +716,13 @@ class KaitousdcMonitorStrategy(Strategy):
         if self._book_delta_buffer:
             data = sorted(self._book_delta_buffer, key=lambda x: x.ts_init)
             self._catalog.write_data(data, skip_disjoint_check=True)
-            self.log.info(f"Flushed {len(data)} KAITOUSDC order book deltas")
+            self.log.info(f"Flushed {len(data)} order book deltas")
             self._book_delta_buffer.clear()
 
         if self._trade_buffer:
             data = sorted(self._trade_buffer, key=lambda x: x.ts_init)
             self._catalog.write_data(data, skip_disjoint_check=True)
-            self.log.info(f"Flushed {len(data)} KAITOUSDC trades")
+            self.log.info(f"Flushed {len(data)} trades")
             self._trade_buffer.clear()
 
         self._last_flush_monotonic = time.monotonic()
@@ -812,7 +823,7 @@ class KaitousdcMonitorStrategy(Strategy):
             + self._ewma_delta_s_count
         )
         self.log.info(
-            "Stopped KAITOUSDC monitor | "
+            "Stopped GLFT market maker | "
             f"instrument_id={self.config.instrument_id} | "
             f"quotes={self._quote_count} | "
             f"trades={self._trade_count} | "

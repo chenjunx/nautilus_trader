@@ -51,8 +51,8 @@ from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.config import TradingNodeConfig
-from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorConfig
-from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorStrategy
+from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMaker
+from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.identifiers import ClientId
@@ -115,8 +115,8 @@ config_node = TradingNodeConfig(
 node = TradingNode(config=config_node)
 
 # Configure and add the live market-maker strategy.
-strategy = KaitousdcMonitorStrategy(
-    config=KaitousdcMonitorConfig(
+strategy = GLFTMarketMaker(
+    config=GLFTMarketMakerConfig(
         instrument_id=instrument_id,
         bar_type=bar_type,
         subscribe_book_deltas=True,

@@ -22,15 +22,15 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 INSTRUMENT_ID = InstrumentId.from_str("KAITOUSDC-PERP.BINANCE")
 BAR_TYPE = BarType.from_str("KAITOUSDC-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL")
-STRATEGY_PATH = Path("nautilus_trader/examples/strategies/kaitousdc_monitor.py")
-RUNNER_PATH = Path("examples/live/binance/binance_kaitousdc_monitor.py")
+STRATEGY_PATH = Path("nautilus_trader/examples/strategies/glft_market_maker.py")
+RUNNER_PATH = Path("examples/live/binance/binance_usdc_perp_monitor.py")
 LIVE_RUNNER_PATH = Path("examples/live/binance/binance_kaitousdc_live.py")
 
 
 def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
-    from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorConfig
+    from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
 
-    config = KaitousdcMonitorConfig(instrument_id=INSTRUMENT_ID)
+    config = GLFTMarketMakerConfig(instrument_id=INSTRUMENT_ID)
 
     assert config.instrument_id == INSTRUMENT_ID
     assert config.bar_type is None
@@ -47,7 +47,6 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.calculate_ewma_variance is True
     assert config.ewma_lambda == 0.94
     assert config.reservation_price_gamma == 0.1
-    assert config.reservation_price_horizon == 150.0
     assert config.reservation_price_min_q == 1
     assert config.reservation_price_max_q == 10
     assert config.quote_intensity_k == 1831.0
@@ -61,9 +60,9 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
 
 
 def test_kaitousdc_monitor_config_accepts_explicit_bar_type() -> None:
-    from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorConfig
+    from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
 
-    config = KaitousdcMonitorConfig(
+    config = GLFTMarketMakerConfig(
         instrument_id=INSTRUMENT_ID,
         bar_type=BAR_TYPE,
     )
@@ -72,11 +71,11 @@ def test_kaitousdc_monitor_config_accepts_explicit_bar_type() -> None:
 
 
 def test_kaitousdc_monitor_strategy_initializes_counters() -> None:
-    from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorConfig
-    from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorStrategy
+    from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
+    from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMaker
 
-    strategy = KaitousdcMonitorStrategy(
-        config=KaitousdcMonitorConfig(
+    strategy = GLFTMarketMaker(
+        config=GLFTMarketMakerConfig(
             instrument_id=INSTRUMENT_ID,
             bar_type=BAR_TYPE,
         ),
@@ -129,7 +128,7 @@ def test_kaitousdc_monitor_strategy_defines_variance_reservation_and_quote_field
     assert "_ewma_sigma" not in content
     assert "ewma_sigma" not in content
     assert "reservation_price_gamma" in content
-    assert "reservation_price_horizon" in content
+    assert "_calculate_g" in content
     assert "reservation_price_min_q" in content
     assert "reservation_price_max_q" in content
     assert "reservation_prices" in content
@@ -168,8 +167,8 @@ def test_kaitousdc_monitor_strategy_defines_market_data_persistence() -> None:
 
 
 def test_kaitousdc_monitor_modules_import() -> None:
-    importlib.import_module("nautilus_trader.examples.strategies.kaitousdc_monitor")
-    importlib.import_module("examples.live.binance.binance_kaitousdc_monitor")
+    importlib.import_module("nautilus_trader.examples.strategies.glft_market_maker")
+    importlib.import_module("examples.live.binance.binance_usdc_perp_monitor")
     importlib.import_module("examples.live.binance.binance_kaitousdc_live")
 
 
@@ -184,7 +183,7 @@ def test_kaitousdc_monitor_runner_targets_binance_usdt_futures_data_only() -> No
     assert "BinanceDataClientConfig" in content
     assert "InstrumentProviderConfig(load_ids=frozenset([instrument_id]))" in content
     assert "BinanceLiveDataClientFactory" in content
-    assert "KaitousdcMonitorStrategy" in content
+    assert "GLFTMarketMaker" in content
     assert "subscribe_book_deltas=True" in content
     assert "book_depth=100" in content
     assert "persist_market_data=True" in content

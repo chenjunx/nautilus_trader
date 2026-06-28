@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """Backtest harness tests for the live (``enable_trading``) path of
-``KaitousdcMonitorStrategy``.
+``GLFTMarketMaker``.
 
 These exercise the post-only market-making behaviour through a full
 ``SimulatedExchange`` + ``BacktestExecClient`` stack. Quoting is driven by the
@@ -45,8 +45,8 @@ from nautilus_trader.common.component import TestClock
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.data.engine import DataEngine
-from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorConfig
-from nautilus_trader.examples.strategies.kaitousdc_monitor import KaitousdcMonitorStrategy
+from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMaker
+from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
 from nautilus_trader.execution.engine import ExecutionEngine
 from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.enums import AccountType
@@ -164,14 +164,14 @@ def _process_quote(env, bid_price: float, ask_price: float) -> None:
     env.exchange.process(ts)
 
 
-def _fire_mid_timer(env, strategy: KaitousdcMonitorStrategy) -> None:
+def _fire_mid_timer(env, strategy: GLFTMarketMaker) -> None:
     ts = _next_ts(env)
     event = TimeEvent(strategy.MID_SAMPLE_TIMER_NAME, UUID4(), ts, ts)
     strategy.on_timer(event)
     env.exchange.process(ts)
 
 
-def _make_strategy(env, **overrides) -> KaitousdcMonitorStrategy:
+def _make_strategy(env, **overrides) -> GLFTMarketMaker:
     defaults = {
         "instrument_id": env.instrument.id,
         "bar_type": None,
@@ -184,8 +184,8 @@ def _make_strategy(env, **overrides) -> KaitousdcMonitorStrategy:
         "calculate_ewma_variance": True,
     }
     defaults.update(overrides)
-    config = KaitousdcMonitorConfig(**defaults)
-    strategy = KaitousdcMonitorStrategy(config=config)
+    config = GLFTMarketMakerConfig(**defaults)
+    strategy = GLFTMarketMaker(config=config)
     strategy.register(
         trader_id=env.trader_id,
         portfolio=env.portfolio,
@@ -198,7 +198,7 @@ def _make_strategy(env, **overrides) -> KaitousdcMonitorStrategy:
 
 def _seed_then_quote(
     env,
-    strategy: KaitousdcMonitorStrategy,
+    strategy: GLFTMarketMaker,
     *,
     delta: float,
 ) -> None:
