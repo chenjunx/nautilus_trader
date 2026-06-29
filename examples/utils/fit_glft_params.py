@@ -286,11 +286,15 @@ SYMBOLS = [
         "name": "NEARUSDC-PERP.BINANCE",
         "dir": "nearusdc",
     },
+    {
+        "name": "KAITOUSDC-PERP.BINANCE",
+        "dir": "kaitousdc",
+    },
 ]
 
 
 def main():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     data_root = os.path.join(project_root, "data")
 
     results = []
@@ -344,7 +348,7 @@ def main():
     print("=" * 80)
 
     header = (
-        f"{'Symbol':<26} {'A':>12} {'k':>10} {'R²':>8} "
+        f"{'Symbol':<26} {'A':>12} {'k':>10} {'R2':>8} "
         f"{'Bins':>6} {'Trades':>9} {'Span(h)':>10} {'Tick':>8}"
     )
     print(header)
@@ -368,7 +372,7 @@ def main():
     print("Interpretation:")
     print("  A  = base arrival rate (trades/sec/price-unit) at δ=0 extrapolation")
     print("  k  = exponential decay rate of arrivals with distance from mid")
-    print("  R² = goodness-of-fit of log-linear regression on binned λ(δ)")
+    print("  R2 = goodness-of-fit of log-linear regression on binned lambda(delta)")
     print()
 
 
