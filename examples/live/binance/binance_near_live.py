@@ -48,12 +48,10 @@ from nautilus_trader.adapters.binance import BinanceInstrumentProviderConfig
 from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance import BinanceLiveExecClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
-from nautilus_trader.adapters.binance.common.symbol import BinanceSymbol
 from nautilus_trader.config import CacheConfig
 from nautilus_trader.config import LiveDataEngineConfig
 from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
-from nautilus_trader.config import PositiveInt
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMaker
 from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
@@ -105,7 +103,6 @@ config_node = TradingNodeConfig(
             max_retries=3,
             log_rejected_due_post_only_as_warning=False,
             use_reduce_only=True,
-            futures_leverages={BinanceSymbol(symbol): PositiveInt(1)},
         ),
     },
     timeout_connection=30.0,
