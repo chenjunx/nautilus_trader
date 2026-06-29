@@ -662,10 +662,10 @@ class GLFTMarketMaker(Strategy):
         tick = self.instrument.price_increment.as_decimal()
         if half_spread < tick:
             self.log.warning(
-                "Skip requote | half_spread < tick | "
+                "Clamp half_spread to tick | half_spread < tick | "
                 f"half_spread={half_spread} | tick={tick}",
             )
-            return
+            half_spread = tick
 
         bid_raw = reservation - half_spread
         ask_raw = reservation + half_spread
