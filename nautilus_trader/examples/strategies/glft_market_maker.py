@@ -80,6 +80,12 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     ----------
     instrument_id : InstrumentId
         The Binance USDT futures instrument ID to monitor.
+    quote_intensity_k : PositiveFloat
+        The order book depth/decay parameter (k) in the GLFT formula.
+        Must be fitted from live LOB data for the target instrument — no default.
+    quote_arrival_a : PositiveFloat
+        The market-order arrival rate scaling parameter (A) in the GLFT formula.
+        Must be fitted from live LOB data for the target instrument — no default.
     bar_type : BarType, optional
         The bar type to subscribe to when ``subscribe_bars`` is enabled.
     subscribe_quotes : bool, default True
@@ -117,12 +123,6 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         The first positive lot count to calculate (actual qty = min_q * lot_size).
     reservation_price_max_q : PositiveInt, default 10
         The final positive lot count to calculate (actual qty = max_q * lot_size).
-    quote_intensity_k : PositiveFloat, default 1831.0
-        The order book depth/decay parameter (k) in the GLFT formula.
-    quote_arrival_a : PositiveFloat, default 1.0
-        The market-order arrival rate scaling parameter (A) in the GLFT formula.
-        With A=1 the formula reduces to the symmetric base case; increase A to
-        widen c (and thus spreads) when arrival rates are higher than assumed.
     max_position : PositiveInt, default 110
         The maximum long inventory (in raw units) before buy quotes are
         suppressed. When the tracked net position reaches this cap, only sell
@@ -152,6 +152,8 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     """
 
     instrument_id: InstrumentId
+    quote_intensity_k: PositiveFloat
+    quote_arrival_a: PositiveFloat
     bar_type: BarType | None = None
     subscribe_quotes: bool = True
     subscribe_trades: bool = True
@@ -169,8 +171,6 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     lot_size: PositiveInt = 11
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
-    quote_intensity_k: PositiveFloat = 2473.25
-    quote_arrival_a: PositiveFloat = 266.13
     max_position: PositiveInt = 110
     enable_trading: bool = False
     trade_size: PositiveInt | None = None

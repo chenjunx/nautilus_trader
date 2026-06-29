@@ -119,6 +119,8 @@ node = TradingNode(config=config_node)
 strategy = GLFTMarketMaker(
     config=GLFTMarketMakerConfig(
         instrument_id=instrument_id,
+        quote_intensity_k=480.51,
+        quote_arrival_a=15.31,
         bar_type=bar_type,
         subscribe_book_deltas=True,
         book_depth=100,
