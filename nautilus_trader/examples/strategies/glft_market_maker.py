@@ -439,8 +439,9 @@ class GLFTMarketMaker(Strategy):
 
         if self.config.enable_trading and self._ewma_delta_s_var is not None:
             sigma = self._ewma_delta_s_var.sqrt()
-            if self._sigma_anchor is None:
+            if self._sigma_anchor is None or self._sigma_anchor == 0:
                 # Seed the anchor on the first valid σ — no requote yet.
+                # Also re-seed when anchor is zero to avoid division by zero.
                 self._sigma_anchor = sigma
             elif abs(sigma - self._sigma_anchor) / self._sigma_anchor > Decimal(
                 str(self.config.theta_vol)
