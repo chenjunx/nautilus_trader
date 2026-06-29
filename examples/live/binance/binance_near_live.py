@@ -62,7 +62,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
 
 
-symbol = "NEARUSDT-PERP"
+symbol = "NEARUSDC-PERP"
 instrument_id = InstrumentId.from_str(f"{symbol}.BINANCE")
 bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
 

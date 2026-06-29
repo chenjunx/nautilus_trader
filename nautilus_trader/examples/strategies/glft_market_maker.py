@@ -177,7 +177,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         default_factory=lambda: {
             "ETHUSDT-PERP": 1,
             "SOLUSDT-PERP": 1,
-            "NEARUSDT-PERP": 3,
+            "NEARUSDC-PERP": 3,
             "KAITOUSDC-PERP": 11,
         },
     )
@@ -185,7 +185,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         default_factory=lambda: {
             "ETHUSDT-PERP": 4,
             "SOLUSDT-PERP": 10,
-            "NEARUSDT-PERP": 30,
+            "NEARUSDC-PERP": 30,
             "KAITOUSDC-PERP": 110,
         },
     )
@@ -671,31 +671,51 @@ class GLFTMarketMaker(Strategy):
         ask_raw = reservation + half_spread
         trade_size = Decimal(str(self._trade_size))
         max_position = self._effective_max_position()
+        suppress_ask = self._position <= Decimal(0)
+
+        bid_snap = self._round_to_tick(bid_raw, ROUND_FLOOR)
+        ask_snap = self._round_to_tick(ask_raw, ROUND_CEILING)
+
+        # Skip the cancel/resubmit cycle when resting orders already reflect
+        # the target prices — avoids unnecessary churn when the mid hasn't
+        # moved between timer ticks.
+        open_orders = [
+            *self.cache.orders_open(instrument_id=instrument_id, strategy_id=self.id),
+            *self.cache.orders_inflight(instrument_id=instrument_id, strategy_id=self.id),
+        ]
+        resting_bids = [o for o in open_orders if o.side == OrderSide.BUY]
+        resting_asks = [o for o in open_orders if o.side == OrderSide.SELL]
+        bid_ok = len(resting_bids) == 1 and resting_bids[0].price.as_decimal() == bid_snap
+        ask_ok = (suppress_ask and not resting_asks) or (
+            not suppress_ask
+            and len(resting_asks) == 1
+            and resting_asks[0].price.as_decimal() == ask_snap
+        )
+        if bid_ok and ask_ok:
+            self.log.debug(
+                "Skip requote | prices unchanged | "
+                f"bid={bid_snap} | ask={ask_snap}",
+            )
+            return
 
         # Record resting/inflight order IDs as self-cancels before the async
         # cancel_all_orders sweep so the resulting OrderCanceled/OrderExpired
         # events are recognised as our own; also accumulate worst-case long
         # exposure (canceled BUYs still count until the venue acks).
         pending_buy = Decimal(0)
-        for order in (
-            *self.cache.orders_open(instrument_id=instrument_id, strategy_id=self.id),
-            *self.cache.orders_inflight(instrument_id=instrument_id, strategy_id=self.id),
-        ):
+        for order in open_orders:
             self._pending_self_cancels.add(order.client_order_id)
             if order.side == OrderSide.BUY:
                 pending_buy += Decimal(str(order.leaves_qty))
         self.cancel_all_orders(instrument_id)
 
         # SELL (ask) suppressed at q=0 to avoid opening a short in one-way mode.
-        suppress_ask = self._position <= Decimal(0)
         if not suppress_ask:
             ask_order = self.order_factory.limit(
                 instrument_id=instrument_id,
                 order_side=OrderSide.SELL,
                 quantity=self._trade_size,
-                price=self.instrument.make_price(
-                    self._round_to_tick(ask_raw, ROUND_CEILING),
-                ),
+                price=self.instrument.make_price(ask_snap),
                 time_in_force=TimeInForce.GTC,
                 post_only=True,
             )
@@ -712,9 +732,7 @@ class GLFTMarketMaker(Strategy):
                 instrument_id=instrument_id,
                 order_side=OrderSide.BUY,
                 quantity=self._trade_size,
-                price=self.instrument.make_price(
-                    self._round_to_tick(bid_raw, ROUND_FLOOR),
-                ),
+                price=self.instrument.make_price(bid_snap),
                 time_in_force=TimeInForce.GTC,
                 post_only=True,
             )
