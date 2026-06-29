@@ -14,7 +14,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Run a LIVE post-only market maker for Binance ``KAITOUSDC-PERP`` (USDT futures).
+Run a LIVE post-only GLFT market maker for Binance ``NEARUSDT-PERP`` (USDT futures).
 
 REAL MONEY. This configures an execution client and the strategy will submit
 real post-only orders when ``enable_trading=True``.
@@ -27,14 +27,18 @@ Operator prerequisites
 * Account MUST be in **one-way** position mode. Under Hedge mode
   ``close_all_positions(reduce_only=True)`` fails on connect.
 * Leverage is set to 1x via ``futures_leverages``; verify it in the Binance UI
-  on first run (no in-repo Binance example exercises this field).
-* ``lot_size`` (11) must match the live instrument ``min_quantity`` and be a
-  multiple of its ``size_increment`` or orders will be rejected.
+  on first run.
+* trade_size (3) and max_position (30) are resolved from ``instrument_trade_sizes``
+  and ``instrument_max_positions`` in ``GLFTMarketMakerConfig``.
 
 Recommended first run: set ``enable_trading=False`` and confirm the data +
 account connect and EWMA/reservation logs flow with NO orders, then flip to
 ``True``.
 """
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from nautilus_trader.adapters.binance import BINANCE
 from nautilus_trader.adapters.binance import BinanceAccountType
@@ -60,13 +64,13 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
 
 
-symbol = "KAITOUSDC-PERP"
+symbol = "NEARUSDT-PERP"
 instrument_id = InstrumentId.from_str(f"{symbol}.BINANCE")
 bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
 
 # Configure the trading node for live USDT futures with an execution client.
 config_node = TradingNodeConfig(
-    trader_id=TraderId("KAITOUSDC-LIVE-MM-001"),
+    trader_id=TraderId("NEAR-LIVE-MM-001"),
     logging=LoggingConfig(log_level="INFO", use_pyo3=True),
     data_engine=LiveDataEngineConfig(
         external_clients=[ClientId(BINANCE)],
@@ -125,7 +129,7 @@ strategy = GLFTMarketMaker(
         # stale-quote exposure (driven by the mid-sample timer).
         mid_sample_interval_secs=0.5,
         persist_market_data=True,
-        catalog_path="data/kaitousdc/catalog",
+        catalog_path="data/near/catalog",
         flush_interval_secs=5.0,
         max_buffer_size=10_000,
         # Live trading opt-ins:

@@ -172,8 +172,20 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     max_position: PositiveInt = 110
     enable_trading: bool = False
     trade_size: PositiveInt | None = None
+    instrument_trade_sizes: dict[str, int] = {
+        "ETHUSDT-PERP": 1,
+        "SOLUSDT-PERP": 1,
+        "NEARUSDT-PERP": 3,
+        "KAITOUSDC-PERP": 11,
+    }
+    instrument_max_positions: dict[str, int] = {
+        "ETHUSDT-PERP": 4,
+        "SOLUSDT-PERP": 10,
+        "NEARUSDT-PERP": 30,
+        "KAITOUSDC-PERP": 110,
+    }
     persist_market_data: bool = True
-    catalog_path: str = "data/kaitousdc/catalog"
+    catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
     max_buffer_size: PositiveInt = 10_000
 
@@ -243,14 +255,19 @@ class GLFTMarketMaker(Strategy):
 
         if self.config.enable_trading:
             try:
-                self._trade_size = self.instrument.make_qty(
-                    self.config.trade_size
-                    if self.config.trade_size is not None
-                    else self.config.lot_size,
-                )
+                symbol = self.config.instrument_id.symbol.value
+                if self.config.trade_size is not None:
+                    raw_trade_size = self.config.trade_size
+                elif symbol in self.config.instrument_trade_sizes:
+                    raw_trade_size = self.config.instrument_trade_sizes[symbol]
+                elif self.instrument.min_quantity is not None:
+                    raw_trade_size = self.instrument.min_quantity
+                else:
+                    raw_trade_size = self.instrument.size_increment
+                self._trade_size = self.instrument.make_qty(raw_trade_size)
             except ValueError as e:
                 self.log.error(
-                    f"Invalid trade_size/lot_size for {self.config.instrument_id}: {e}",
+                    f"Invalid trade_size for {self.config.instrument_id}: {e}",
                 )
                 self.stop()
                 return
@@ -370,6 +387,17 @@ class GLFTMarketMaker(Strategy):
             f"count={self._mid_sample_count}",
         )
 
+        realized = self.portfolio.realized_pnl(self.config.instrument_id)
+        unrealized = self.portfolio.unrealized_pnl(self.config.instrument_id)
+        total = self.portfolio.total_pnl(self.config.instrument_id)
+        self.log.info(
+            "PnL | "
+            f"instrument_id={self.config.instrument_id} | "
+            f"realized={realized} | "
+            f"unrealized={unrealized} | "
+            f"total={total}",
+        )
+
         if self.config.enable_trading:
             self._requote_live()
 
@@ -487,7 +515,8 @@ class GLFTMarketMaker(Strategy):
         if g is None:
             return None
 
-        lot = self.config.lot_size
+        symbol = self.config.instrument_id.symbol.value
+        lot = self.config.instrument_trade_sizes.get(symbol, self.config.lot_size)
         return {
             q * lot: str(
                 self._round_to_tick(
@@ -539,7 +568,7 @@ class GLFTMarketMaker(Strategy):
         # fully long, so buy (bid) quotes are suppressed and only sell (ask)
         # quotes are emitted to draw inventory back down. The short side is
         # never capped.
-        suppress_bid = self._position >= Decimal(self.config.max_position)
+        suppress_bid = self._position >= self._effective_max_position()
         quote_prices: dict[int, dict[str, str | None]] = {}
         for q, reservation_price in self._reservation_prices.items():
             # Snap bid down / ask up to the tick grid so the realized spread
@@ -564,6 +593,11 @@ class GLFTMarketMaker(Strategy):
                 ),
             }
         return quote_prices
+
+    def _effective_max_position(self) -> Decimal:
+        symbol = self.config.instrument_id.symbol.value
+        raw = self.config.instrument_max_positions.get(symbol, self.config.max_position)
+        return Decimal(raw)
 
     def _update_position(self) -> None:
         """
@@ -631,7 +665,7 @@ class GLFTMarketMaker(Strategy):
         bid_raw = reservation - half_spread
         ask_raw = reservation + half_spread
         trade_size = Decimal(str(self._trade_size))
-        max_position = Decimal(self.config.max_position)
+        max_position = self._effective_max_position()
 
         # Record resting/inflight order IDs as self-cancels before the async
         # cancel_all_orders sweep so the resulting OrderCanceled/OrderExpired
@@ -647,18 +681,25 @@ class GLFTMarketMaker(Strategy):
                 pending_buy += Decimal(str(order.leaves_qty))
         self.cancel_all_orders(instrument_id)
 
-        # SELL (ask) is never capped (one-directional long cap).
-        ask_order = self.order_factory.limit(
-            instrument_id=instrument_id,
-            order_side=OrderSide.SELL,
-            quantity=self._trade_size,
-            price=self.instrument.make_price(
-                self._round_to_tick(ask_raw, ROUND_CEILING),
-            ),
-            time_in_force=TimeInForce.GTC,
-            post_only=True,
-        )
-        self.submit_order(ask_order)
+        # SELL (ask) suppressed at q=0 to avoid opening a short in one-way mode.
+        suppress_ask = self._position <= Decimal(0)
+        if not suppress_ask:
+            ask_order = self.order_factory.limit(
+                instrument_id=instrument_id,
+                order_side=OrderSide.SELL,
+                quantity=self._trade_size,
+                price=self.instrument.make_price(
+                    self._round_to_tick(ask_raw, ROUND_CEILING),
+                ),
+                time_in_force=TimeInForce.GTC,
+                post_only=True,
+            )
+            self.submit_order(ask_order)
+        else:
+            self.log.info(
+                "SELL suppressed | at zero position | "
+                f"position={self._position}",
+            )
 
         # BUY (bid) only if the worst-case long exposure stays within the cap.
         if self._position + pending_buy + trade_size <= max_position:
