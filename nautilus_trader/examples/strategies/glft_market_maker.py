@@ -23,6 +23,7 @@ import time
 
 import pandas as pd
 
+from nautilus_trader.common.enums import LogColor
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import PositiveFloat
 from nautilus_trader.config import PositiveInt
@@ -395,12 +396,15 @@ class GLFTMarketMaker(Strategy):
         realized = self.portfolio.realized_pnl(self.config.instrument_id)
         unrealized = self.portfolio.unrealized_pnl(self.config.instrument_id)
         total = self.portfolio.total_pnl(self.config.instrument_id)
+        total_val = float(total) if total is not None else 0.0
+        pnl_color = LogColor.GREEN if total_val > 0 else (LogColor.RED if total_val < 0 else LogColor.NORMAL)
         self.log.info(
             "PnL | "
             f"instrument_id={self.config.instrument_id} | "
             f"realized={realized} | "
             f"unrealized={unrealized} | "
             f"total={total}",
+            color=pnl_color,
         )
 
         if self.config.enable_trading:
