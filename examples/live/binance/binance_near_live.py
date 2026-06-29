@@ -124,7 +124,7 @@ strategy = GLFTMarketMaker(
         book_depth=100,
         # Re-quote on a tighter cadence than the 2.0s monitor default to limit
         # stale-quote exposure (driven by the mid-sample timer).
-        mid_sample_interval_secs=0.5,
+        mid_sample_interval_secs=2.0,
         persist_market_data=True,
         catalog_path="data/near/catalog",
         flush_interval_secs=5.0,
