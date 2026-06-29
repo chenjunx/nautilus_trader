@@ -27,6 +27,7 @@ from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import PositiveFloat
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.config import StrategyConfig
+from pydantic import Field
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
@@ -172,18 +173,22 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     max_position: PositiveInt = 110
     enable_trading: bool = False
     trade_size: PositiveInt | None = None
-    instrument_trade_sizes: dict[str, int] = {
-        "ETHUSDT-PERP": 1,
-        "SOLUSDT-PERP": 1,
-        "NEARUSDT-PERP": 3,
-        "KAITOUSDC-PERP": 11,
-    }
-    instrument_max_positions: dict[str, int] = {
-        "ETHUSDT-PERP": 4,
-        "SOLUSDT-PERP": 10,
-        "NEARUSDT-PERP": 30,
-        "KAITOUSDC-PERP": 110,
-    }
+    instrument_trade_sizes: dict[str, int] = Field(
+        default_factory=lambda: {
+            "ETHUSDT-PERP": 1,
+            "SOLUSDT-PERP": 1,
+            "NEARUSDT-PERP": 3,
+            "KAITOUSDC-PERP": 11,
+        },
+    )
+    instrument_max_positions: dict[str, int] = Field(
+        default_factory=lambda: {
+            "ETHUSDT-PERP": 4,
+            "SOLUSDT-PERP": 10,
+            "NEARUSDT-PERP": 30,
+            "KAITOUSDC-PERP": 110,
+        },
+    )
     persist_market_data: bool = True
     catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
