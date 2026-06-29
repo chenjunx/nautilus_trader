@@ -133,13 +133,33 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         Safety kill-switch. When ``False`` (default) the strategy is
         monitoring-only and never submits, cancels, or closes orders — so it
         stays inert without an execution client and the data-only runner keeps
-        working. When ``True`` it places post-only bid/ask limit orders on each
-        mid sample, gated by ``max_position``.
+        working. When ``True`` it places post-only bid/ask limit orders, requoting
+        immediately on fills (q change) or when σ drifts beyond ``theta_vol``
+        relative to the last-requote anchor.
     trade_size : PositiveInt, optional
         The per-order quantity (raw units) used when ``enable_trading`` is
         ``True``. If ``None`` (default) it resolves to ``lot_size`` so each
         quote is one lot and each fill moves inventory by one lot, matching the
         reservation-price grid.
+    theta_vol : PositiveFloat, default 0.25
+        Relative σ drift threshold for timer-driven requotes.  A new quote is
+        issued when ``|σ_new − σ_anchor| / σ_anchor > theta_vol``, where
+        ``σ_anchor`` is the σ value locked at the last requote.  After each
+        σ-triggered requote the anchor is updated to the current σ.
+    dead_band_ticks : PositiveFloat, default 1.5
+        Minimum dead-band width expressed in price increments (ticks).  Filters
+        pure noise: a mid move of less than 1 tick is exchange jitter, not a
+        real price shift.
+    dead_band_ratio : PositiveFloat, default 0.3
+        Dead-band width as a fraction of the current half-spread.  Scales the
+        threshold to the instrument's natural liquidity — wide-spread coins get
+        a wider dead band automatically.  The effective dead band is
+        ``max(dead_band_ticks × tick_size, dead_band_ratio × half_spread)``
+        so whichever standard is stricter (larger) wins.
+    max_requote_interval_secs : PositiveFloat, default 30.0
+        Watchdog: if no requote has been triggered for this many seconds the
+        strategy forces one unconditionally.  Guards against edge cases where
+        none of the event-driven triggers fires for an extended period.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
     catalog_path : str, default "data/kaitousdc/catalog"
@@ -174,6 +194,10 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     max_position: PositiveInt = 110
     enable_trading: bool = False
     trade_size: PositiveInt | None = None
+    theta_vol: PositiveFloat = 0.25
+    dead_band_ticks: PositiveFloat = 1.5
+    dead_band_ratio: PositiveFloat = 0.3
+    max_requote_interval_secs: PositiveFloat = 30.0
     instrument_trade_sizes: dict[str, int] = msgspec.field(
         default_factory=lambda: {
             "ETHUSDT-PERP": 1,
@@ -248,6 +272,9 @@ class GLFTMarketMaker(Strategy):
         self._position: Decimal = Decimal(0)
         self._trade_size: Quantity | None = None
         self._pending_self_cancels: set[ClientOrderId] = set()
+        self._sigma_anchor: Decimal | None = None
+        self._mid_at_last_quote: Decimal | None = None
+        self._last_requote_ns: int = 0
 
     def on_start(self) -> None:
         """
@@ -359,6 +386,9 @@ class GLFTMarketMaker(Strategy):
             f"count={self._quote_count}",
         )
 
+        if self.config.enable_trading:
+            self._check_dead_band(tick)
+
     def on_timer(self, event: TimeEvent) -> None:
         """
         Actions to be performed when a timer event is received.
@@ -407,8 +437,34 @@ class GLFTMarketMaker(Strategy):
             color=pnl_color,
         )
 
+        if self.config.enable_trading and self._ewma_delta_s_var is not None:
+            sigma = self._ewma_delta_s_var.sqrt()
+            if self._sigma_anchor is None:
+                # Seed the anchor on the first valid σ — no requote yet.
+                self._sigma_anchor = sigma
+            elif abs(sigma - self._sigma_anchor) / self._sigma_anchor > Decimal(
+                str(self.config.theta_vol)
+            ):
+                self.log.info(
+                    "σ threshold crossed | requoting | "
+                    f"sigma={sigma} | sigma_anchor={self._sigma_anchor} | "
+                    f"theta_vol={self.config.theta_vol}",
+                )
+                self._requote_live()
+                self._sigma_anchor = sigma
+                if self._last_quote is not None:
+                    bid = self._last_quote.bid_price.as_decimal()
+                    ask = self._last_quote.ask_price.as_decimal()
+                    self._mid_at_last_quote = bid + (ask - bid) / Decimal("2")
+
         if self.config.enable_trading:
-            self._requote_live()
+            interval_ns = int(self.config.max_requote_interval_secs * 1e9)
+            if self.clock.timestamp_ns() - self._last_requote_ns > interval_ns:
+                self.log.info(
+                    "Watchdog | requoting | "
+                    f"no requote for >{self.config.max_requote_interval_secs}s",
+                )
+                self._requote_live()
 
     def on_order_filled(self, event: OrderFilled) -> None:
         """
@@ -420,6 +476,15 @@ class GLFTMarketMaker(Strategy):
         order = self.cache.order(event.client_order_id)
         if order is not None and order.is_closed:
             self._pending_self_cancels.discard(event.client_order_id)
+
+        # q changed — requote immediately without waiting for the next timer tick.
+        if self.config.enable_trading:
+            self._update_position()
+            self._requote_live()
+            if self._last_quote is not None:
+                bid = self._last_quote.bid_price.as_decimal()
+                ask = self._last_quote.ask_price.as_decimal()
+                self._mid_at_last_quote = bid + (ask - bid) / Decimal("2")
 
     def on_order_canceled(self, event: OrderCanceled) -> None:
         """
@@ -629,6 +694,43 @@ class GLFTMarketMaker(Strategy):
             net += qty if pos.signed_qty > 0 else -qty
         self._position = net
 
+    def _check_dead_band(self, tick: QuoteTick) -> None:
+        """
+        Trigger a requote when mid has walked outside the dead band since the
+        last actual quote submission.
+
+        The dead band is ``max(dead_band_ticks × tick_size,
+        dead_band_ratio × half_spread)`` — whichever is stricter (larger).
+        Both the mid anchor and spread come from the last requote, not rolling
+        values, so intra-tick EWMA jitter cannot retrigger this check.
+        """
+        if (
+            self._mid_at_last_quote is None
+            or self._quote_spread is None
+            or self.instrument is None
+        ):
+            return
+
+        bid = tick.bid_price.as_decimal()
+        ask = tick.ask_price.as_decimal()
+        mid = bid + (ask - bid) / Decimal("2")
+
+        tick_size = self.instrument.price_increment.as_decimal()
+        half_spread = Decimal(self._quote_spread) / Decimal("2")
+        dead_band = max(
+            Decimal(str(self.config.dead_band_ticks)) * tick_size,
+            Decimal(str(self.config.dead_band_ratio)) * half_spread,
+        )
+
+        if abs(mid - self._mid_at_last_quote) > dead_band:
+            self.log.info(
+                "Dead band crossed | requoting | "
+                f"mid={mid} | mid_anchor={self._mid_at_last_quote} | "
+                f"dead_band={dead_band}",
+            )
+            self._requote_live()
+            self._mid_at_last_quote = mid
+
     def _requote_live(self) -> None:
         """
         Refresh the post-only bid/ask quotes for the current inventory.
@@ -640,6 +742,8 @@ class GLFTMarketMaker(Strategy):
         is True. ``self._position`` is refreshed earlier in the same tick by
         :meth:`_create_mid_price_sample`.
         """
+        self._last_requote_ns = self.clock.timestamp_ns()
+
         if (
             self.instrument is None
             or self._trade_size is None
