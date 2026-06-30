@@ -36,6 +36,8 @@ account connect and EWMA/reservation logs flow with NO orders, then flip to
 ``True``.
 """
 
+import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -49,6 +51,7 @@ from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance import BinanceLiveExecClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.config import CacheConfig
+from nautilus_trader.config import DatabaseConfig
 from nautilus_trader.config import LiveDataEngineConfig
 from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -80,6 +83,12 @@ config_node = TradingNodeConfig(
         graceful_shutdown_on_exception=True,
     ),
     cache=CacheConfig(
+        database=DatabaseConfig(
+            type="redis",
+            host="localhost",
+            port=6379,
+            password=os.environ.get("REDIS_PASSWORD"),
+        ),
         timestamps_as_iso8601=True,
         flush_on_start=False,
     ),

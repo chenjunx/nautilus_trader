@@ -275,6 +275,7 @@ class GLFTMarketMaker(Strategy):
         self._sigma_anchor: Decimal | None = None
         self._mid_at_last_quote: Decimal | None = None
         self._last_requote_ns: int = 0
+        self._last_cancel_reason: str = ""
 
     def on_start(self) -> None:
         """
@@ -451,7 +452,7 @@ class GLFTMarketMaker(Strategy):
                     f"sigma={sigma} | sigma_anchor={self._sigma_anchor} | "
                     f"theta_vol={self.config.theta_vol}",
                 )
-                self._requote_live()
+                self._requote_live(reason="sigma_threshold")
                 self._sigma_anchor = sigma
                 if self._last_quote is not None:
                     bid = self._last_quote.bid_price.as_decimal()
@@ -465,7 +466,7 @@ class GLFTMarketMaker(Strategy):
                     "Watchdog | requoting | "
                     f"no requote for >{self.config.max_requote_interval_secs}s",
                 )
-                self._requote_live()
+                self._requote_live(reason="watchdog")
 
     def on_order_filled(self, event: OrderFilled) -> None:
         """
@@ -481,7 +482,7 @@ class GLFTMarketMaker(Strategy):
         # q changed — requote immediately without waiting for the next timer tick.
         if self.config.enable_trading:
             self._update_position()
-            self._requote_live()
+            self._requote_live(reason="fill")
             if self._last_quote is not None:
                 bid = self._last_quote.bid_price.as_decimal()
                 ask = self._last_quote.ask_price.as_decimal()
@@ -493,8 +494,16 @@ class GLFTMarketMaker(Strategy):
         """
         if event.client_order_id in self._pending_self_cancels:
             self._pending_self_cancels.discard(event.client_order_id)
+            self.log.info(
+                "Order self-canceled | "
+                f"client_order_id={event.client_order_id} | "
+                f"reason={self._last_cancel_reason}",
+            )
             return
-        # External cancel: nothing to do; the next timer tick re-quotes anyway.
+        self.log.info(
+            "Order externally canceled | "
+            f"client_order_id={event.client_order_id}",
+        )
 
     def on_order_expired(self, event: OrderExpired) -> None:
         """
@@ -729,10 +738,10 @@ class GLFTMarketMaker(Strategy):
                 f"mid={mid} | mid_anchor={self._mid_at_last_quote} | "
                 f"dead_band={dead_band}",
             )
-            self._requote_live()
+            self._requote_live(reason="dead_band")
             self._mid_at_last_quote = mid
 
-    def _requote_live(self) -> None:
+    def _requote_live(self, reason: str = "timer") -> None:
         """
         Refresh the post-only bid/ask quotes for the current inventory.
 
@@ -816,6 +825,13 @@ class GLFTMarketMaker(Strategy):
             self._pending_self_cancels.add(order.client_order_id)
             if order.side == OrderSide.BUY:
                 pending_buy += Decimal(str(order.leaves_qty))
+        self._last_cancel_reason = reason
+        if open_orders:
+            self.log.info(
+                f"Cancelling orders | reason={reason} | "
+                f"count={len(open_orders)} | "
+                f"order_ids={[o.client_order_id.value for o in open_orders]}",
+            )
         self.cancel_all_orders(instrument_id)
 
         # SELL (ask) suppressed at q=0 to avoid opening a short in one-way mode.
