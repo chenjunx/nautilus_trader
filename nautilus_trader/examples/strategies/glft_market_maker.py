@@ -156,7 +156,11 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         a wider dead band automatically.  The effective dead band is
         ``max(dead_band_ticks × tick_size, dead_band_ratio × half_spread)``
         so whichever standard is stricter (larger) wins.
-    max_requote_interval_secs : PositiveFloat, default 30.0
+    enable_dead_band : bool, default False
+        If ``True``, requote when mid moves beyond the dead band since the last
+        quote submission.  Set to ``False`` to disable quote-tick driven
+        requotes while keeping the ``_check_dead_band`` code intact.
+    max_requote_interval_secs : PositiveFloat, default 60.0
         Watchdog: if no requote has been triggered for this many seconds the
         strategy forces one unconditionally.  Guards against edge cases where
         none of the event-driven triggers fires for an extended period.
@@ -195,9 +199,10 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     enable_trading: bool = False
     trade_size: PositiveInt | None = None
     theta_vol: PositiveFloat = 0.25
+    enable_dead_band: bool = False
     dead_band_ticks: PositiveFloat = 1.5
     dead_band_ratio: PositiveFloat = 0.3
-    max_requote_interval_secs: PositiveFloat = 30.0
+    max_requote_interval_secs: PositiveFloat = 60.0
     instrument_trade_sizes: dict[str, int] = msgspec.field(
         default_factory=lambda: {
             "ETHUSDT-PERP": 1,
@@ -387,7 +392,7 @@ class GLFTMarketMaker(Strategy):
             f"count={self._quote_count}",
         )
 
-        if self.config.enable_trading:
+        if self.config.enable_trading and self.config.enable_dead_band:
             self._check_dead_band(tick)
 
     def on_timer(self, event: TimeEvent) -> None:
