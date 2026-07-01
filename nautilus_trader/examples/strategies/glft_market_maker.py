@@ -375,7 +375,7 @@ class GLFTMarketMaker(Strategy):
         # RLS parameter estimator (created in on_start when enabled)
         self._rls: _RLSEstimator | None = None
         self._rls_trade_buf: list[tuple[int, int]] = []  # (ts_ns, sweep_depth)
-        self._rls_last_side: int = 0
+        self._rls_last_side: object = None  # AggressorSide enum; None before first trade
         self._rls_last_trade_ns: int = 0
         self._rls_sweep_depth: int = 0
         self._rls_last_update_ns: int = 0
@@ -497,6 +497,7 @@ class GLFTMarketMaker(Strategy):
                         self.config.rls_redis_url,
                         decode_responses=True,
                         socket_connect_timeout=2,
+                        socket_timeout=2,  # covers individual get/set; prevents on_stop hang
                     )
                     sym = self.config.instrument_id.symbol.value
                     k_raw = self._rls_redis.get(f"rls:{sym}:k")
@@ -1202,7 +1203,7 @@ class GLFTMarketMaker(Strategy):
 
         if self.config.enable_rls_fitting:
             ts_ns = tick.ts_event
-            side = int(tick.aggressor_side)
+            side = tick.aggressor_side
             if side == self._rls_last_side and ts_ns - self._rls_last_trade_ns <= 1_000_000_000:
                 self._rls_sweep_depth += 1
             else:
@@ -1315,3 +1316,9 @@ class GLFTMarketMaker(Strategy):
         if self._rls_executor is not None:
             self._rls_executor.shutdown(wait=True)
             self._rls_executor = None
+        if self._rls_redis is not None:
+            try:
+                self._rls_redis.close()
+            except Exception:
+                pass
+            self._rls_redis = None
