@@ -128,8 +128,8 @@ node = TradingNode(config=config_node)
 strategy = GLFTMarketMaker(
     config=GLFTMarketMakerConfig(
         instrument_id=instrument_id,
-        quote_intensity_k=480.51,
-        quote_arrival_a=15.31,
+        quote_intensity_k=1717.0,   # fitted from 24.6h NEARUSDC-PERP history (2026-06-28/29)
+        quote_arrival_a=0.293,      # same fit; config k=480/A=15 was ~50x off on fill rate
         bar_type=bar_type,
         subscribe_book_deltas=True,
         book_depth=100,
@@ -140,6 +140,11 @@ strategy = GLFTMarketMaker(
         catalog_path="data/near/catalog",
         flush_interval_secs=5.0,
         max_buffer_size=10_000,
+        # Online parameter adaptation via Recursive Least Squares.
+        # Starts from the fitted k/A above and tracks daily changes.
+        enable_rls_fitting=True,
+        rls_forgetting=0.95,          # effective memory ~800s (~4 windows)
+        rls_update_interval_secs=200.0,
         # Live trading opt-ins:
         enable_trading=True,
         external_order_claims=[instrument_id],

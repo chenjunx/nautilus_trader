@@ -19,6 +19,7 @@ from decimal import ROUND_CEILING
 from decimal import ROUND_FLOOR
 from decimal import ROUND_HALF_UP
 from decimal import Decimal
+import math
 import time
 
 import pandas as pd
@@ -50,6 +51,62 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.trading.strategy import Strategy
+
+
+class _RLSEstimator:
+    """
+    Recursive Least Squares for GLFT λ(δ) = A·exp(−k·δ).
+
+    Fits log(λ) = log(A) − k·δ with a forgetting factor so older windows
+    are down-weighted automatically.  State is θ = [log(A), −k] and a 2×2
+    covariance matrix P.  No external dependencies — pure Python floats.
+    """
+
+    __slots__ = ("_lf", "_theta", "_P")
+
+    def __init__(self, k0: float, a0: float, forgetting: float = 0.95) -> None:
+        self._lf: float = forgetting
+        self._theta: list[float] = [math.log(max(a0, 1e-9)), -k0]
+        # Large initial covariance → learns quickly from first observations.
+        self._P: list[list[float]] = [[1000.0, 0.0], [0.0, 1000.0]]
+
+    def update(self, delta: float, rate: float) -> None:
+        """Incorporate one (δ, observed_rate) observation."""
+        if rate <= 0.0:
+            return
+        y = math.log(rate)
+        P = self._P
+        th = self._theta
+        lf = self._lf
+
+        # Px = P @ x  where x = [1, delta]
+        Px0 = P[0][0] + P[0][1] * delta
+        Px1 = P[1][0] + P[1][1] * delta
+
+        # scalar denominator: λ + x^T P x
+        denom = lf + Px0 + delta * Px1
+
+        # Kalman gain and innovation
+        K0 = Px0 / denom
+        K1 = Px1 / denom
+        innov = y - (th[0] + th[1] * delta)
+
+        th[0] += K0 * innov
+        th[1] += K1 * innov
+
+        # covariance update: (P − K x^T P) / λ
+        P[0][0] = (P[0][0] - K0 * Px0) / lf
+        P[0][1] = (P[0][1] - K0 * Px1) / lf
+        P[1][0] = (P[1][0] - K1 * Px0) / lf
+        P[1][1] = (P[1][1] - K1 * Px1) / lf
+
+    @property
+    def k(self) -> float:
+        return max(1.0, -self._theta[1])
+
+    @property
+    def a(self) -> float:
+        return max(1e-6, math.exp(self._theta[0]))
 
 
 @dataclass(frozen=True)
@@ -164,6 +221,18 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         Watchdog: if no requote has been triggered for this many seconds the
         strategy forces one unconditionally.  Guards against edge cases where
         none of the event-driven triggers fires for an extended period.
+    enable_rls_fitting : bool, default False
+        If ``True``, k and A are updated continuously from live trade ticks
+        using Recursive Least Squares with forgetting factor, instead of
+        using the static ``quote_intensity_k`` / ``quote_arrival_a`` values.
+    rls_forgetting : PositiveFloat, default 0.95
+        Forgetting factor λ_f ∈ (0, 1).  Each update window contributes with
+        weight (1-λ_f) and older windows decay as λ_f^n.  With a 200 s
+        update interval, λ_f=0.95 gives effective memory ≈ 4 windows (800 s).
+    rls_update_interval_secs : PositiveFloat, default 200.0
+        How often (in seconds) to run an RLS update from the accumulated
+        trade buffer.  Aligned to the mid-sample timer; actual interval is
+        rounded up to the next timer tick.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
     catalog_path : str, default "data/kaitousdc/catalog"
@@ -219,6 +288,9 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
             "KAITOUSDC-PERP": 110,
         },
     )
+    enable_rls_fitting: bool = False
+    rls_forgetting: PositiveFloat = 0.95
+    rls_update_interval_secs: PositiveFloat = 200.0
     persist_market_data: bool = True
     catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
@@ -281,6 +353,15 @@ class GLFTMarketMaker(Strategy):
         self._mid_at_last_quote: Decimal | None = None
         self._last_requote_ns: int = 0
         self._last_cancel_reason: str = ""
+        # RLS parameter estimator (created in on_start when enabled)
+        self._rls: _RLSEstimator | None = None
+        self._rls_trade_buf: list[tuple[int, int]] = []  # (ts_ns, sweep_depth)
+        self._rls_last_side: int = 0
+        self._rls_last_trade_ns: int = 0
+        self._rls_sweep_depth: int = 0
+        self._rls_last_update_ns: int = 0
+        self._rls_k: Decimal = Decimal(str(config.quote_intensity_k))
+        self._rls_a: Decimal = Decimal(str(config.quote_arrival_a))
 
     def on_start(self) -> None:
         """
@@ -375,6 +456,20 @@ class GLFTMarketMaker(Strategy):
             f"flush_interval_secs={self.config.flush_interval_secs} | "
             f"max_buffer_size={self.config.max_buffer_size}",
         )
+
+        if self.config.enable_rls_fitting:
+            self._rls = _RLSEstimator(
+                k0=self.config.quote_intensity_k,
+                a0=self.config.quote_arrival_a,
+                forgetting=self.config.rls_forgetting,
+            )
+            self.log.info(
+                "RLS fitting ENABLED | "
+                f"k0={self.config.quote_intensity_k} | "
+                f"a0={self.config.quote_arrival_a} | "
+                f"forgetting={self.config.rls_forgetting} | "
+                f"update_interval={self.config.rls_update_interval_secs}s",
+            )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """
@@ -472,6 +567,13 @@ class GLFTMarketMaker(Strategy):
                     f"no requote for >{self.config.max_requote_interval_secs}s",
                 )
                 self._requote_live(reason="watchdog")
+
+        if self.config.enable_rls_fitting and self._rls is not None:
+            now_ns = self.clock.timestamp_ns()
+            interval_ns = int(self.config.rls_update_interval_secs * 1e9)
+            if now_ns - self._rls_last_update_ns >= interval_ns:
+                self._rls_update()
+                self._rls_last_update_ns = now_ns
 
     def on_order_filled(self, event: OrderFilled) -> None:
         """
@@ -590,8 +692,8 @@ class GLFTMarketMaker(Strategy):
             return None
 
         gamma = Decimal(str(self.config.reservation_price_gamma))
-        k = Decimal(str(self.config.quote_intensity_k))
-        a = Decimal(str(self.config.quote_arrival_a))
+        k = self._effective_k()
+        a = self._effective_a()
         ratio = gamma / k
         exponent = Decimal("1") + k / gamma
         g_sq = (gamma * self._ewma_delta_s_var / (Decimal("2") * k * a)) * (
@@ -644,7 +746,7 @@ class GLFTMarketMaker(Strategy):
             return None
 
         gamma = Decimal(str(self.config.reservation_price_gamma))
-        k = Decimal(str(self.config.quote_intensity_k))
+        k = self._effective_k()
         total_spread = g + (Decimal("2") / gamma) * (Decimal("1") + gamma / k).ln()
         return str(total_spread)
 
@@ -708,6 +810,60 @@ class GLFTMarketMaker(Strategy):
             qty = Decimal(str(pos.quantity))
             net += qty if pos.signed_qty > 0 else -qty
         self._position = net
+
+    def _effective_k(self) -> Decimal:
+        """Return k from RLS estimate when enabled, otherwise from config."""
+        if self.config.enable_rls_fitting:
+            return self._rls_k
+        return Decimal(str(self.config.quote_intensity_k))
+
+    def _effective_a(self) -> Decimal:
+        """Return A from RLS estimate when enabled, otherwise from config."""
+        if self.config.enable_rls_fitting:
+            return self._rls_a
+        return Decimal(str(self.config.quote_arrival_a))
+
+    def _rls_update(self) -> None:
+        """
+        Run one RLS update step using trades accumulated since the last update.
+
+        Groups buffered trades by sweep depth to estimate λ(δ) at each level,
+        then feeds those (δ, rate) pairs into the RLS estimator.  Requires at
+        least two distinct depth levels to constrain both k and A.
+        """
+        if self._rls is None or self.instrument is None:
+            return
+
+        buf = self._rls_trade_buf
+        self._rls_trade_buf = []
+
+        if len(buf) < 4:
+            return
+
+        tick_size = float(self.instrument.price_increment.as_decimal())
+        T = self.config.rls_update_interval_secs
+
+        depth_counts: dict[int, int] = {}
+        for _, depth in buf:
+            depth_counts[depth] = depth_counts.get(depth, 0) + 1
+
+        if len(depth_counts) < 2:
+            return
+
+        for depth in sorted(depth_counts):
+            rate = depth_counts[depth] / T
+            delta = (depth + 0.5) * tick_size
+            self._rls.update(delta, rate)
+
+        k_new = self._rls.k
+        a_new = self._rls.a
+        self._rls_k = Decimal(str(round(k_new, 2)))
+        self._rls_a = Decimal(str(round(a_new, 6)))
+        self.log.info(
+            "RLS update | "
+            f"k={k_new:.1f} | a={a_new:.4f} | "
+            f"window_trades={len(buf)} | depth_levels={len(depth_counts)}",
+        )
 
     def _check_dead_band(self, tick: QuoteTick) -> None:
         """
@@ -943,6 +1099,17 @@ class GLFTMarketMaker(Strategy):
             f"aggressor_side={tick.aggressor_side} | "
             f"count={self._trade_count}",
         )
+
+        if self.config.enable_rls_fitting:
+            ts_ns = tick.ts_event
+            side = int(tick.aggressor_side)
+            if side == self._rls_last_side and ts_ns - self._rls_last_trade_ns <= 1_000_000_000:
+                self._rls_sweep_depth += 1
+            else:
+                self._rls_sweep_depth = 0
+            self._rls_last_side = side
+            self._rls_last_trade_ns = ts_ns
+            self._rls_trade_buf.append((ts_ns, self._rls_sweep_depth))
 
     def on_bar(self, bar: Bar) -> None:
         """
