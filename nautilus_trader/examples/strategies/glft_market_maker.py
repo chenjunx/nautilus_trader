@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import ROUND_CEILING
 from decimal import ROUND_FLOOR
@@ -21,6 +22,16 @@ from decimal import ROUND_HALF_UP
 from decimal import Decimal
 import math
 import time
+from typing import TYPE_CHECKING
+
+try:
+    import redis as _redis_mod
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
+
+if TYPE_CHECKING:
+    import redis as _redis_type_mod
 
 import pandas as pd
 
@@ -233,6 +244,13 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         How often (in seconds) to run an RLS update from the accumulated
         trade buffer.  Aligned to the mid-sample timer; actual interval is
         rounded up to the next timer tick.
+    rls_redis_url : str or None, default None
+        Redis URL for persisting fitted k/A across restarts, e.g.
+        ``"redis://localhost:6379/0"`` or ``"redis://:password@host:6379/0"``.
+        Keys written: ``rls:{symbol}:k`` and ``rls:{symbol}:a``.
+        On ``on_start`` the strategy reads these keys first; on each RLS
+        update the background worker overwrites them.  When ``None`` or when
+        the ``redis`` package is not installed, persistence is silently skipped.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
     catalog_path : str, default "data/kaitousdc/catalog"
@@ -291,6 +309,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     enable_rls_fitting: bool = False
     rls_forgetting: PositiveFloat = 0.95
     rls_update_interval_secs: PositiveFloat = 200.0
+    rls_redis_url: str | None = None
     persist_market_data: bool = True
     catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
@@ -360,8 +379,14 @@ class GLFTMarketMaker(Strategy):
         self._rls_last_trade_ns: int = 0
         self._rls_sweep_depth: int = 0
         self._rls_last_update_ns: int = 0
+        # Cached fitted values — written by background thread, read by main thread.
+        # Decimal assignment is atomic under Python's GIL so no explicit lock needed.
         self._rls_k: Decimal = Decimal(str(config.quote_intensity_k))
         self._rls_a: Decimal = Decimal(str(config.quote_arrival_a))
+        # Background executor (max_workers=1 serialises fitting jobs)
+        self._rls_executor: ThreadPoolExecutor | None = None
+        # Redis client for cross-restart persistence (None when disabled/unavailable)
+        self._rls_redis: "_redis_type_mod.Redis | None" = None  # type: ignore[name-defined]
 
     def on_start(self) -> None:
         """
@@ -458,17 +483,54 @@ class GLFTMarketMaker(Strategy):
         )
 
         if self.config.enable_rls_fitting:
+            self._rls_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="rls-fit",
+            )
+
+            # Try to warm-start k/A from Redis before constructing the estimator.
+            k_init = self.config.quote_intensity_k
+            a_init = self.config.quote_arrival_a
+            if self.config.rls_redis_url and _REDIS_AVAILABLE:
+                try:
+                    self._rls_redis = _redis_mod.from_url(  # type: ignore[union-attr]
+                        self.config.rls_redis_url,
+                        decode_responses=True,
+                        socket_connect_timeout=2,
+                    )
+                    sym = self.config.instrument_id.symbol.value
+                    k_raw = self._rls_redis.get(f"rls:{sym}:k")
+                    a_raw = self._rls_redis.get(f"rls:{sym}:a")
+                    if k_raw is not None and a_raw is not None:
+                        k_init = float(k_raw)
+                        a_init = float(a_raw)
+                        self._rls_k = Decimal(str(round(k_init, 2)))
+                        self._rls_a = Decimal(str(round(a_init, 6)))
+                        self.log.info(
+                            "RLS warm-start from Redis | "
+                            f"k={k_init:.1f} | a={a_init:.6f}",
+                        )
+                    else:
+                        self.log.info(
+                            "RLS Redis connected | no saved values found | "
+                            "using config defaults",
+                        )
+                except Exception as exc:
+                    self.log.warning(
+                        f"RLS Redis connection failed — using config defaults | {exc}",
+                    )
+
             self._rls = _RLSEstimator(
-                k0=self.config.quote_intensity_k,
-                a0=self.config.quote_arrival_a,
+                k0=k_init,
+                a0=a_init,
                 forgetting=self.config.rls_forgetting,
             )
             self.log.info(
                 "RLS fitting ENABLED | "
-                f"k0={self.config.quote_intensity_k} | "
-                f"a0={self.config.quote_arrival_a} | "
+                f"k0={k_init:.2f} | a0={a_init:.6f} | "
                 f"forgetting={self.config.rls_forgetting} | "
-                f"update_interval={self.config.rls_update_interval_secs}s",
+                f"update_interval={self.config.rls_update_interval_secs}s | "
+                f"redis={'yes' if self._rls_redis is not None else 'no'}",
             )
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -825,15 +887,18 @@ class GLFTMarketMaker(Strategy):
 
     def _rls_update(self) -> None:
         """
-        Run one RLS update step using trades accumulated since the last update.
+        Coordinator (main thread): atomically swap the trade buffer and submit
+        a fitting job to the background executor.
 
-        Groups buffered trades by sweep depth to estimate λ(δ) at each level,
-        then feeds those (δ, rate) pairs into the RLS estimator.  Requires at
-        least two distinct depth levels to constrain both k and A.
+        The actual RLS computation happens in ``_rls_fit_worker`` so the event
+        loop is never blocked.  The fitted k/A land in ``_rls_k`` / ``_rls_a``
+        (the cache) asynchronously; ``_effective_k/_effective_a`` read from
+        there without waiting.
         """
         if self._rls is None or self.instrument is None:
             return
 
+        # Atomic buffer swap: hand the window to the worker, start a fresh one.
         buf = self._rls_trade_buf
         self._rls_trade_buf = []
 
@@ -842,6 +907,29 @@ class GLFTMarketMaker(Strategy):
 
         tick_size = float(self.instrument.price_increment.as_decimal())
         T = self.config.rls_update_interval_secs
+
+        if self._rls_executor is not None:
+            self._rls_executor.submit(self._rls_fit_worker, buf, tick_size, T)
+        else:
+            # Fallback: run inline when executor was shut down (e.g. during tests).
+            self._rls_fit_worker(buf, tick_size, T)
+
+    def _rls_fit_worker(
+        self,
+        buf: list[tuple[int, int]],
+        tick_size: float,
+        T: float,
+    ) -> None:
+        """
+        Background worker: fit RLS, update the k/A cache, persist to Redis.
+
+        Runs in a single-worker ``ThreadPoolExecutor`` — never concurrent with
+        itself.  Writes to ``_rls_k`` / ``_rls_a`` are Decimal assignments which
+        are atomic under Python's GIL, safe for the main thread to read at any
+        time without explicit locking.
+        """
+        if self._rls is None:
+            return
 
         depth_counts: dict[int, int] = {}
         for _, depth in buf:
@@ -857,11 +945,23 @@ class GLFTMarketMaker(Strategy):
 
         k_new = self._rls.k
         a_new = self._rls.a
+
+        # Atomic cache write (GIL-protected object reference assignment).
         self._rls_k = Decimal(str(round(k_new, 2)))
         self._rls_a = Decimal(str(round(a_new, 6)))
+
+        # Persist to Redis (fire-and-forget; failure is non-fatal).
+        if self._rls_redis is not None:
+            try:
+                sym = self.config.instrument_id.symbol.value
+                self._rls_redis.set(f"rls:{sym}:k", str(k_new))
+                self._rls_redis.set(f"rls:{sym}:a", str(a_new))
+            except Exception as exc:
+                self.log.warning(f"RLS Redis write failed | {exc}")
+
         self.log.info(
             "RLS update | "
-            f"k={k_new:.1f} | a={a_new:.4f} | "
+            f"k={k_new:.1f} | a={a_new:.6f} | "
             f"window_trades={len(buf)} | depth_levels={len(depth_counts)}",
         )
 
@@ -1209,3 +1309,9 @@ class GLFTMarketMaker(Strategy):
             f"position={self._position} | "
             f"received_data={total > 0}",
         )
+
+        # Wait for any in-flight RLS fitting job to finish so the final k/A
+        # values are persisted to Redis before the process exits.
+        if self._rls_executor is not None:
+            self._rls_executor.shutdown(wait=True)
+            self._rls_executor = None

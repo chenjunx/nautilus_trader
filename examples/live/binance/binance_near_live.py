@@ -145,6 +145,7 @@ strategy = GLFTMarketMaker(
         enable_rls_fitting=True,
         rls_forgetting=0.95,          # effective memory ~800s (~4 windows)
         rls_update_interval_secs=200.0,
+        rls_redis_url="redis://localhost:6379/0",
         # Live trading opt-ins:
         enable_trading=True,
         external_order_claims=[instrument_id],
