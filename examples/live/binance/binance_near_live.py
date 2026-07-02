@@ -130,7 +130,7 @@ strategy = GLFTMarketMaker(
         instrument_id=instrument_id,
         quote_intensity_k=1717.0,   # fitted from 24.6h NEARUSDC-PERP history (2026-06-28/29)
         quote_arrival_a=0.293,      # same fit; config k=480/A=15 was ~50x off on fill rate
-        reservation_price_gamma=1.0,
+        gamma=1.0,
         bar_type=bar_type,
         subscribe_book_deltas=True,
         book_depth=100,

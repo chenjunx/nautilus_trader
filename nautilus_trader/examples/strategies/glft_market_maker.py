@@ -204,7 +204,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         If EWMA variance should be calculated from fixed-interval mid price increments.
     ewma_lambda : PositiveFloat, default 0.94
         The EWMA decay factor for squared mid price increments.
-    reservation_price_gamma : PositiveFloat, default 0.1
+    gamma : PositiveFloat, default 0.1
         The risk aversion coefficient (γ) in the GLFT formula.
     lot_size : PositiveInt, default 11
         The number of units per lot (one 手). Inventory levels are always multiples
@@ -314,7 +314,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     mid_sample_history_size: PositiveInt = 2
     calculate_ewma_variance: bool = True
     ewma_lambda: PositiveFloat = 0.94
-    reservation_price_gamma: PositiveFloat = 0.1
+    gamma: PositiveFloat = 0.1
     lot_size: PositiveInt = 11
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
@@ -518,7 +518,7 @@ class GLFTMarketMaker(Strategy):
             f"mid_sample_interval_secs={self.config.mid_sample_interval_secs} | "
             f"calculate_ewma_variance={self.config.calculate_ewma_variance} | "
             f"ewma_lambda={self.config.ewma_lambda} | "
-            f"reservation_price_gamma={self.config.reservation_price_gamma} | "
+            f"gamma={self.config.gamma} | "
             f"lot_size={self.config.lot_size} | "
             f"reservation_price_min_q={self.config.reservation_price_min_q} | "
             f"reservation_price_max_q={self.config.reservation_price_max_q} | "
@@ -807,7 +807,7 @@ class GLFTMarketMaker(Strategy):
         if self._ewma_delta_s_var is None:
             return None
 
-        gamma = Decimal(str(self.config.reservation_price_gamma))
+        gamma = Decimal(str(self.config.gamma))
         k = self._effective_k()
         a = self._effective_a()
         ratio = gamma / k
@@ -861,7 +861,7 @@ class GLFTMarketMaker(Strategy):
         if g is None:
             return None
 
-        gamma = Decimal(str(self.config.reservation_price_gamma))
+        gamma = Decimal(str(self.config.gamma))
         k = self._effective_k()
         total_spread = g + (Decimal("2") / gamma) * (Decimal("1") + gamma / k).ln()
         return str(total_spread)
@@ -1264,7 +1264,7 @@ class GLFTMarketMaker(Strategy):
             instrument_id=self.config.instrument_id,
             k=str(self._effective_k()),
             a=str(self._effective_a()),
-            gamma=float(self.config.reservation_price_gamma),
+            gamma=float(self.config.gamma),
             sigma=str(self._ewma_delta_s_var.sqrt()),
             mid=str(mid_dec),
             position=str(self._position),

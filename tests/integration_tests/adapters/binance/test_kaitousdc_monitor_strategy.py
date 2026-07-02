@@ -46,7 +46,7 @@ def test_kaitousdc_monitor_config_defaults_to_data_only_subscriptions() -> None:
     assert config.mid_sample_history_size == 2
     assert config.calculate_ewma_variance is True
     assert config.ewma_lambda == 0.94
-    assert config.reservation_price_gamma == 0.1
+    assert config.gamma == 0.1
     assert config.reservation_price_min_q == 1
     assert config.reservation_price_max_q == 10
     assert config.quote_intensity_k == 1831.0
@@ -127,7 +127,7 @@ def test_kaitousdc_monitor_strategy_defines_variance_reservation_and_quote_field
     assert "_ewma_delta_s_count" in content
     assert "_ewma_sigma" not in content
     assert "ewma_sigma" not in content
-    assert "reservation_price_gamma" in content
+    assert "gamma" in content
     assert "_calculate_g" in content
     assert "reservation_price_min_q" in content
     assert "reservation_price_max_q" in content
