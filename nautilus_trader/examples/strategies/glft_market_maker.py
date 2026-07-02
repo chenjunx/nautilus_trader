@@ -41,7 +41,9 @@ from nautilus_trader.config import PositiveFloat
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.config import StrategyConfig
 import msgspec
+from nautilus_trader.core.data import Data
 from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.custom import customdataclass
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import OrderBookDelta
@@ -138,6 +140,28 @@ class MidPriceSample:
     quote_spread: str | None
     quote_prices: dict[int, dict[str, str | None]] | None
     position: str
+
+
+@customdataclass
+class GLFTParamsSnapshot(Data):
+    """
+    A structured, catalog-persistable snapshot of the strategy's live GLFT
+    parameters — for offline time-series reconstruction of a run, as an
+    alternative to parsing free-text logs.
+    """
+
+    instrument_id: InstrumentId
+    k: str
+    a: str
+    gamma: float
+    sigma: str
+    mid: str
+    position: str
+    quote_spread: str
+    reservation_price: str
+    bid: str
+    ask: str
+    rls_enabled: bool
 
 
 class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
@@ -259,6 +283,18 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         The maximum interval in seconds between market data flushes.
     max_buffer_size : PositiveInt, default 10000
         The maximum buffered trade and book delta count before flushing.
+    persist_params : bool, default True
+        If per-tick GLFT parameter snapshots (k, A, gamma, sigma, mid,
+        position, reservation price, quoted bid/ask) should be persisted to
+        the catalog as ``GLFTParamsSnapshot`` records, for offline
+        time-series reconstruction of a run. Independent of
+        ``persist_market_data``. Writes to disk happen asynchronously on a
+        dedicated background thread so they never block the strategy's main
+        event handling.
+    params_flush_interval_secs : PositiveFloat, default 5.0
+        The maximum interval in seconds between parameter snapshot flushes.
+    params_max_buffer_size : PositiveInt, default 100
+        The maximum buffered parameter snapshot count before flushing.
 
     """
 
@@ -314,6 +350,9 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
     max_buffer_size: PositiveInt = 10_000
+    persist_params: bool = True
+    params_flush_interval_secs: PositiveFloat = 5.0
+    params_max_buffer_size: PositiveInt = 100
 
 
 class GLFTMarketMaker(Strategy):
@@ -387,6 +426,11 @@ class GLFTMarketMaker(Strategy):
         self._rls_executor: ThreadPoolExecutor | None = None
         # Redis client for cross-restart persistence (None when disabled/unavailable)
         self._rls_redis: "_redis_type_mod.Redis | None" = None  # type: ignore[name-defined]
+        # Parameter snapshot buffer, flushed asynchronously to the catalog.
+        self._param_snapshot_buffer: list[GLFTParamsSnapshot] = []
+        self._last_params_flush_monotonic = time.monotonic()
+        # Background executor (max_workers=1 serialises catalog writes)
+        self._params_executor: ThreadPoolExecutor | None = None
 
     def on_start(self) -> None:
         """
@@ -420,9 +464,15 @@ class GLFTMarketMaker(Strategy):
         else:
             self.log.info("Trading DISABLED (monitor-only)")
 
-        if self.config.persist_market_data:
+        if self.config.persist_market_data or self.config.persist_params:
             self._catalog = ParquetDataCatalog(self.config.catalog_path)
             self._catalog.write_data([self.instrument])
+
+        if self.config.persist_params:
+            self._params_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="params-flush",
+            )
 
         if self.config.subscribe_book_deltas:
             self._book = OrderBook(
@@ -586,6 +636,9 @@ class GLFTMarketMaker(Strategy):
             f"position={sample.position} | "
             f"count={self._mid_sample_count}",
         )
+
+        if self.config.persist_params and self._ewma_delta_s_var is not None:
+            self._capture_params_snapshot()
 
         realized = self.portfolio.realized_pnl(self.config.instrument_id)
         unrealized = self.portfolio.unrealized_pnl(self.config.instrument_id)
@@ -1184,6 +1237,99 @@ class GLFTMarketMaker(Strategy):
 
         self._last_flush_monotonic = time.monotonic()
 
+    def _capture_params_snapshot(self) -> None:
+        """
+        Build a ``GLFTParamsSnapshot`` from current state and buffer it.
+
+        Pure in-memory: no disk or network I/O on this (main) thread. Actual
+        persistence happens later on the background executor via
+        :meth:`_flush_params_if_needed`.
+        """
+        if self._last_quote is None or self._ewma_delta_s_var is None:
+            return
+
+        bid_dec = self._last_quote.bid_price.as_decimal()
+        ask_dec = self._last_quote.ask_price.as_decimal()
+        mid_dec = bid_dec + (ask_dec - bid_dec) / Decimal("2")
+
+        reservation = self._reservation_price_for(mid_dec, self._position)
+        if reservation is None or self._quote_spread is None:
+            return
+
+        half_spread = Decimal(self._quote_spread) / Decimal("2")
+        bid_q = self._round_to_tick(reservation - half_spread, ROUND_FLOOR)
+        ask_q = self._round_to_tick(reservation + half_spread, ROUND_CEILING)
+
+        snapshot = GLFTParamsSnapshot(
+            instrument_id=self.config.instrument_id,
+            k=str(self._effective_k()),
+            a=str(self._effective_a()),
+            gamma=float(self.config.reservation_price_gamma),
+            sigma=str(self._ewma_delta_s_var.sqrt()),
+            mid=str(mid_dec),
+            position=str(self._position),
+            quote_spread=self._quote_spread,
+            reservation_price=str(reservation),
+            bid=str(bid_q),
+            ask=str(ask_q),
+            rls_enabled=self.config.enable_rls_fitting,
+            ts_event=self._last_quote.ts_event,
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self._param_snapshot_buffer.append(snapshot)
+        self._flush_params_if_needed()
+
+    def _flush_params_if_needed(self) -> None:
+        if not self.config.persist_params:
+            return
+
+        if len(self._param_snapshot_buffer) >= self.config.params_max_buffer_size:
+            self._flush_params_async()
+            return
+
+        elapsed = time.monotonic() - self._last_params_flush_monotonic
+        if elapsed >= self.config.params_flush_interval_secs:
+            self._flush_params_async()
+
+    def _flush_params_async(self) -> None:
+        """
+        Hand the buffered snapshots off to the background executor.
+
+        Swaps the buffer for a fresh list (O(1), main-thread only) then
+        submits the swapped-out list to a single-worker executor for the
+        actual (blocking) Parquet write, so the main event loop never waits
+        on disk I/O.
+        """
+        self._last_params_flush_monotonic = time.monotonic()
+
+        if not self._param_snapshot_buffer or self._catalog is None:
+            return
+
+        buf = self._param_snapshot_buffer
+        self._param_snapshot_buffer = []
+
+        if self._params_executor is not None:
+            self._params_executor.submit(self._flush_params_worker, buf)
+        else:
+            # Fallback: run inline when executor was shut down (e.g. during tests).
+            self._flush_params_worker(buf)
+
+    def _flush_params_worker(self, buf: list[GLFTParamsSnapshot]) -> None:
+        """
+        Background worker: write buffered parameter snapshots to the catalog.
+
+        Runs in a single-worker ``ThreadPoolExecutor`` — never concurrent
+        with itself. ``GLFTParamsSnapshot`` is its own Parquet dataset type
+        (catalog partitions by type), so this cannot race with the
+        main-thread trade/book-delta writes in :meth:`_flush_market_data`.
+        """
+        if self._catalog is None:
+            return
+
+        data = sorted(buf, key=lambda x: x.ts_init)
+        self._catalog.write_data(data, skip_disjoint_check=True)
+        self.log.info(f"Flushed {len(data)} param snapshots")
+
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
         Actions to be performed when a trade tick is received.
@@ -1281,6 +1427,7 @@ class GLFTMarketMaker(Strategy):
             # in one-way position mode (fails on connect under Hedge mode).
             self.close_all_positions(self.config.instrument_id)
         self._flush_market_data()
+        self._flush_params_async()
         total = (
             self._quote_count
             + self._trade_count
@@ -1322,3 +1469,9 @@ class GLFTMarketMaker(Strategy):
             except Exception:
                 pass
             self._rls_redis = None
+
+        # Wait for any in-flight parameter-snapshot flush to finish so the
+        # final snapshots are written before the process exits.
+        if self._params_executor is not None:
+            self._params_executor.shutdown(wait=True)
+            self._params_executor = None
