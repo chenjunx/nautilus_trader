@@ -221,6 +221,29 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         (ask) quotes are emitted so inventory is drawn back down. The cap is
         one-directional (long only); the short side is never capped. Defaults
         to ``reservation_price_max_q * lot_size`` (10 * 11 = 110).
+    max_g_ratio : PositiveFloat, default 0.01
+        Safety ceiling on the reservation-price offset ``q·g``, expressed as a
+        fraction of the current mid price. Since the offset scales with
+        position size, the cap on ``g`` is scaled inversely with ``|q|``
+        (``g_cap(q) = max_g_ratio * mid / max(|q|, 1)``) so the *offset*
+        itself — not just the per-unit ``g`` — stays within
+        ``max_g_ratio`` of mid regardless of how large a position is being
+        quoted. Guards reservation prices against numerical blow-ups (e.g. a
+        degenerate k/A fit) that would otherwise produce absurd quotes.
+        Applied inside ``_reservation_price_for`` /
+        ``_calculate_reservation_prices`` via ``_clamp_g_for_q``; breaches
+        are logged. Note: with the GLFT formula's typical γ (small risk
+        aversion), ``g`` itself is usually tiny relative to total spread, so
+        this rarely engages — see ``max_spread_ratio`` for the spread-side
+        guard.
+    max_spread_ratio : PositiveFloat, default 0.005
+        Safety ceiling on the total quote spread, expressed as a fraction of
+        the current mid price (``spread_cap = max_spread_ratio * mid``).
+        ``total_spread = g + (2/γ)·ln(1+γ/k)`` — the second (log) term
+        dominates under typical γ and can blow up on its own when k drops,
+        even without ``g`` blowing up, so it needs its own ceiling
+        independent of ``max_g_ratio``. Applied inside
+        ``_calculate_quote_spread``; breaches are logged.
     enable_trading : bool, default False
         Safety kill-switch. When ``False`` (default) the strategy is
         monitoring-only and never submits, cancels, or closes orders — so it
@@ -275,6 +298,16 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         On ``on_start`` the strategy reads these keys first; on each RLS
         update the background worker overwrites them.  When ``None`` or when
         the ``redis`` package is not installed, persistence is silently skipped.
+    rls_max_jump_ratio : PositiveFloat, default 5.0
+        Sanity guard against a single-window fit jumping too far from the
+        currently cached k/A. If a new fit's k or A differs from the cached
+        value by more than this multiplicative factor in either direction
+        (``max(new/old, old/new) > rls_max_jump_ratio``), the update is
+        rejected: the previous ``_rls_k`` / ``_rls_a`` are kept and nothing is
+        written to Redis. This catches degenerate fits (e.g. the internal RLS
+        estimator floored at k=1.0) without hardcoding an assumed "correct"
+        magnitude for k/A — it only assumes k/A evolve gradually between
+        consecutive fit windows.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
     catalog_path : str, default "data/kaitousdc/catalog"
@@ -319,6 +352,8 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     reservation_price_min_q: PositiveInt = 1
     reservation_price_max_q: PositiveInt = 10
     max_position: PositiveInt = 110
+    max_g_ratio: PositiveFloat = 0.01
+    max_spread_ratio: PositiveFloat = 0.005
     enable_trading: bool = False
     trade_size: PositiveInt | None = None
     theta_vol: PositiveFloat = 0.25
@@ -346,6 +381,7 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     rls_forgetting: PositiveFloat = 0.95
     rls_update_interval_secs: PositiveFloat = 200.0
     rls_redis_url: str | None = None
+    rls_max_jump_ratio: PositiveFloat = 5.0
     persist_market_data: bool = True
     catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
@@ -803,6 +839,9 @@ class GLFTMarketMaker(Strategy):
 
         Used as the per-unit reservation-price adjustment and as the first term
         of the total spread.  Returns None until the EWMA variance is seeded.
+        Raw (unclamped): the actual offset ``q·g`` is bounded separately in
+        :meth:`_clamp_g_for_q`, since a flat cap on ``g`` alone doesn't bound
+        ``q·g`` once ``q`` varies.
         """
         if self._ewma_delta_s_var is None:
             return None
@@ -817,6 +856,29 @@ class GLFTMarketMaker(Strategy):
         ) ** exponent
         return g_sq.sqrt()
 
+    def _clamp_g_for_q(self, g: Decimal, mid: Decimal, q_raw_signed: Decimal) -> Decimal:
+        """
+        Bound the reservation-price offset ``q·g`` to ``max_g_ratio * mid`` by
+        scaling the cap on ``g`` inversely with ``|q|``.  A flat cap on ``g``
+        would still let the *offset* blow up proportionally to position size,
+        so the cap is computed per call as ``max_g_ratio * mid / max(|q|, 1)``.
+        """
+        q_abs = abs(q_raw_signed)
+        if q_abs == 0:
+            return g
+
+        g_cap = (Decimal(str(self.config.max_g_ratio)) * mid) / q_abs
+        if g > g_cap:
+            self.log.warning(
+                f"GLFT g={g} exceeds q-scaled cap {g_cap} for q={q_raw_signed} "
+                f"(max_g_ratio={self.config.max_g_ratio}, mid={mid}) — "
+                "clamping. Likely a degenerate k/A estimate.",
+                color=LogColor.RED,
+            )
+            return g_cap
+
+        return g
+
     def _calculate_reservation_prices(self, mid: Decimal) -> dict[int, str] | None:
         g = self._calculate_g()
         if g is None:
@@ -824,18 +886,15 @@ class GLFTMarketMaker(Strategy):
 
         symbol = self.config.instrument_id.symbol.value
         lot = self.config.instrument_trade_sizes.get(symbol, self.config.lot_size)
-        return {
-            q * lot: str(
-                self._round_to_tick(
-                    mid - Decimal(q * lot) * g,
-                    ROUND_HALF_UP,
-                )
-            )
-            for q in range(
-                self.config.reservation_price_min_q,
-                self.config.reservation_price_max_q + 1,
-            )
-        }
+        result = {}
+        for q in range(
+            self.config.reservation_price_min_q,
+            self.config.reservation_price_max_q + 1,
+        ):
+            q_raw = Decimal(q * lot)
+            g_q = self._clamp_g_for_q(g, mid, q_raw)
+            result[q * lot] = str(self._round_to_tick(mid - q_raw * g_q, ROUND_HALF_UP))
+        return result
 
     def _reservation_price_for(
         self,
@@ -846,13 +905,16 @@ class GLFTMarketMaker(Strategy):
         Reservation price for an arbitrary signed inventory level (raw units).
 
         GLFT formula: r = mid - q·g, where g is the per-unit price adjustment
-        from :meth:`_calculate_g`.  Accepts any signed ``q`` (including zero
-        and negative) so live quoting can key off the current net position.
+        from :meth:`_calculate_g`, clamped per-``q`` by :meth:`_clamp_g_for_q`
+        so the offset itself stays within ``max_g_ratio`` of mid.  Accepts any
+        signed ``q`` (including zero and negative) so live quoting can key off
+        the current net position.
         """
         g = self._calculate_g()
         if g is None:
             return None
 
+        g = self._clamp_g_for_q(g, mid, q_raw_signed)
         reservation = mid - q_raw_signed * g
         return self._round_to_tick(reservation, ROUND_HALF_UP)
 
@@ -864,6 +926,19 @@ class GLFTMarketMaker(Strategy):
         gamma = Decimal(str(self.config.gamma))
         k = self._effective_k()
         total_spread = g + (Decimal("2") / gamma) * (Decimal("1") + gamma / k).ln()
+
+        if self._last_mid is not None:
+            spread_cap = Decimal(str(self.config.max_spread_ratio)) * self._last_mid
+            if total_spread > spread_cap:
+                self.log.warning(
+                    f"GLFT total_spread={total_spread} exceeds cap {spread_cap} "
+                    f"(max_spread_ratio={self.config.max_spread_ratio}, "
+                    f"mid={self._last_mid}, k={k}, a={self._effective_a()}) — "
+                    "clamping. Likely a degenerate k/A estimate.",
+                    color=LogColor.RED,
+                )
+                total_spread = spread_cap
+
         return str(total_spread)
 
     def _calculate_quote_prices(self) -> dict[int, dict[str, str | None]] | None:
@@ -981,6 +1056,11 @@ class GLFTMarketMaker(Strategy):
         itself.  Writes to ``_rls_k`` / ``_rls_a`` are Decimal assignments which
         are atomic under Python's GIL, safe for the main thread to read at any
         time without explicit locking.
+
+        A fit whose k or A jumps more than ``rls_max_jump_ratio`` away from
+        the currently cached value (in either direction) is rejected outright:
+        the cache and Redis are left untouched so a single bad window can't
+        poison live quotes.
         """
         if self._rls is None:
             return
@@ -999,6 +1079,28 @@ class GLFTMarketMaker(Strategy):
 
         k_new = self._rls.k
         a_new = self._rls.a
+
+        prev_k = float(self._rls_k)
+        prev_a = float(self._rls_a)
+        k_jump = max(k_new / prev_k, prev_k / k_new)
+        a_jump = max(a_new / prev_a, prev_a / a_new)
+        max_jump_ratio = self.config.rls_max_jump_ratio
+
+        if k_jump > max_jump_ratio or a_jump > max_jump_ratio:
+            fit_inputs = {
+                depth: (depth_counts[depth], depth_counts[depth] / T)
+                for depth in sorted(depth_counts)
+            }
+            self.log.warning(
+                "RLS update rejected: fit jumped too far from cache "
+                f"k={k_new:.4f} (x{k_jump:.1f}) | a={a_new:.6f} (x{a_jump:.1f}) "
+                f"| max_jump_ratio={max_jump_ratio} | window_trades={len(buf)} | "
+                f"depth_levels={len(depth_counts)} | "
+                f"fit_inputs(depth:(count,rate))={fit_inputs} | "
+                f"keeping previous k={self._rls_k} a={self._rls_a}",
+                color=LogColor.RED,
+            )
+            return
 
         # Atomic cache write (GIL-protected object reference assignment).
         self._rls_k = Decimal(str(round(k_new, 2)))
