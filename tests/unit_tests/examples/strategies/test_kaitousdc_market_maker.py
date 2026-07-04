@@ -29,6 +29,7 @@ min-spread guard lets quotes land.
 These tests require the compiled Cython extensions to run.
 """
 
+from collections import deque
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -47,6 +48,9 @@ from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.data.engine import DataEngine
 from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMaker
 from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
+from nautilus_trader.examples.strategies.glft_market_maker import _PendingDecrease
+from nautilus_trader.examples.strategies.glft_market_maker import _QueueTracker
+from nautilus_trader.examples.strategies.glft_market_maker import _TradeCacheRecord
 from nautilus_trader.execution.engine import ExecutionEngine
 from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.enums import AccountType
@@ -331,3 +335,235 @@ def test_min_spread_guard_skips_quoting(env):
 
     # Assert
     assert len(env.cache.orders_open(instrument_id=env.instrument.id)) == 0
+
+
+# -------------------------------------------------------------------------------------------------
+# Queue-position estimation (`_settle_queue_positions` and friends)
+#
+# These exercise the settlement/matching logic directly on the strategy's
+# internal state (trackers, trade cache, pending decreases) rather than
+# through real order book deltas/trade ticks — the matching math is the
+# highest-risk part of the feature and is easiest to verify against
+# hand-computed expectations in isolation.
+# -------------------------------------------------------------------------------------------------
+
+
+def test_settle_queue_positions_full_match_deducts_matched_qty(env):
+    # Arrange — a decrease of 12 (50 -> 38) fully explained by a single cached
+    # trade inside the match window: no cancellation remainder.
+    strategy = _make_strategy(env, enable_trading=True, estimate_queue_position=True)
+    strategy.start()
+
+    price = Decimal("40000.0")
+    tracker = _QueueTracker(
+        price=price,
+        side=OrderSide.BUY,
+        client_order_id=None,
+        q_ahead_point=Decimal(50),
+        q_ahead_upper=Decimal(50),
+        last_level_size=Decimal(50),
+        last_ts_event=1_000,
+    )
+    strategy._queue_trackers[OrderSide.BUY] = tracker
+    strategy._trade_cache[price] = deque(
+        [_TradeCacheRecord(qty=Decimal(12), ts_event=1_500, remaining=Decimal(12))],
+    )
+    strategy._pending_decreases.append(
+        _PendingDecrease(
+            price=price,
+            side=OrderSide.BUY,
+            level_before=Decimal(50),
+            level_after=Decimal(38),
+            window_start_ts_event=1_000,
+            window_end_ts_event=2_000,
+            due_ns=env.clock.timestamp_ns(),
+            retry_due_ns=None,
+        ),
+    )
+
+    # Act
+    strategy._settle_queue_positions()
+
+    # Assert
+    assert tracker.q_ahead_point == Decimal(38)
+    assert tracker.q_ahead_upper == Decimal(38)
+    assert len(strategy._pending_decreases) == 0
+    assert price not in strategy._trade_cache  # fully-consumed record is dropped
+
+
+def test_settle_queue_positions_partial_match_shrinks_and_caps_by_own_qty(env):
+    # Arrange — a decrease of 40 (100 -> 60) where only 20 is explained by a
+    # cached trade; the remaining 20 is treated as cancellations, shrinking
+    # the point estimate proportionally, then both estimates are capped by
+    # (level_after - own resting qty).
+    strategy = _make_strategy(
+        env,
+        enable_trading=True,
+        estimate_queue_position=True,
+        trade_size=2,
+    )
+    strategy.start()
+    _seed_then_quote(env, strategy, delta=0.2)
+
+    tracker = strategy._queue_trackers[OrderSide.BUY]
+    assert tracker is not None
+    assert tracker.client_order_id is not None
+    own_order = env.cache.order(tracker.client_order_id)
+    assert Decimal(str(own_order.leaves_qty)) == Decimal(2)
+
+    price = tracker.price
+    tracker.q_ahead_point = Decimal(100)
+    tracker.q_ahead_upper = Decimal(100)
+    tracker.last_level_size = Decimal(100)
+    tracker.last_ts_event = 1_000
+    strategy._trade_cache[price] = deque(
+        [_TradeCacheRecord(qty=Decimal(20), ts_event=3_000, remaining=Decimal(20))],
+    )
+    strategy._pending_decreases.append(
+        _PendingDecrease(
+            price=price,
+            side=OrderSide.BUY,
+            level_before=Decimal(100),
+            level_after=Decimal(60),
+            window_start_ts_event=1_000,
+            window_end_ts_event=5_000,
+            due_ns=env.clock.timestamp_ns(),
+            retry_due_ns=None,
+        ),
+    )
+
+    # Act
+    strategy._settle_queue_positions()
+
+    # Assert — matched=20 -> 80; ratio 60/80=0.75 -> 60; cap 60-2=58 -> 58
+    assert tracker.q_ahead_point == Decimal(58)
+    assert tracker.q_ahead_upper == Decimal(58)
+
+
+def test_settle_queue_positions_ignores_trades_outside_window_and_schedules_retry(env):
+    # Arrange — the only cached trade at this price is well before the match
+    # window opened, so the first settlement attempt must not consume it and
+    # must not finalize yet, only schedule a retry.
+    strategy = _make_strategy(env, enable_trading=True, estimate_queue_position=True)
+    strategy.start()
+
+    price = Decimal("100")
+    tracker = _QueueTracker(
+        price=price,
+        side=OrderSide.SELL,
+        client_order_id=None,
+        q_ahead_point=Decimal(50),
+        q_ahead_upper=Decimal(50),
+        last_level_size=Decimal(50),
+        last_ts_event=1_000,
+    )
+    strategy._queue_trackers[OrderSide.SELL] = tracker
+    strategy._trade_cache[price] = deque(
+        [_TradeCacheRecord(qty=Decimal(12), ts_event=500, remaining=Decimal(12))],
+    )
+    strategy._pending_decreases.append(
+        _PendingDecrease(
+            price=price,
+            side=OrderSide.SELL,
+            level_before=Decimal(50),
+            level_after=Decimal(38),
+            window_start_ts_event=1_000,
+            window_end_ts_event=2_000,
+            due_ns=env.clock.timestamp_ns(),
+            retry_due_ns=None,
+        ),
+    )
+
+    # Act
+    strategy._settle_queue_positions()
+
+    # Assert — not finalized: still pending with a retry scheduled, tracker
+    # untouched, and the out-of-window trade record is still cached intact.
+    assert len(strategy._pending_decreases) == 1
+    assert strategy._pending_decreases[0].retry_due_ns is not None
+    assert tracker.q_ahead_point == Decimal(50)
+    assert strategy._trade_cache[price][0].remaining == Decimal(12)
+
+
+def test_settle_queue_positions_finalizes_pure_cancellation_after_retry(env):
+    # Arrange — no cached trades at all; after the retry deadline passes with
+    # still nothing matched, the decrease must finalize as a pure cancel.
+    strategy = _make_strategy(env, enable_trading=True, estimate_queue_position=True)
+    strategy.start()
+
+    price = Decimal("100")
+    tracker = _QueueTracker(
+        price=price,
+        side=OrderSide.SELL,
+        client_order_id=None,
+        q_ahead_point=Decimal(50),
+        q_ahead_upper=Decimal(50),
+        last_level_size=Decimal(50),
+        last_ts_event=1_000,
+    )
+    strategy._queue_trackers[OrderSide.SELL] = tracker
+    strategy._pending_decreases.append(
+        _PendingDecrease(
+            price=price,
+            side=OrderSide.SELL,
+            level_before=Decimal(50),
+            level_after=Decimal(30),
+            window_start_ts_event=1_000,
+            window_end_ts_event=2_000,
+            due_ns=env.clock.timestamp_ns(),
+            retry_due_ns=None,
+        ),
+    )
+
+    # Act — first pass finds nothing and schedules a retry.
+    strategy._settle_queue_positions()
+    retry_due_ns = strategy._pending_decreases[0].retry_due_ns
+    assert retry_due_ns is not None
+
+    # Advance past the retry deadline and settle again.
+    env.clock.set_time(retry_due_ns)
+    strategy._settle_queue_positions()
+
+    # Assert — matched=0 -> ratio 30/50=0.6 applied to 50 -> 30; cap 30-0=30
+    assert len(strategy._pending_decreases) == 0
+    assert tracker.q_ahead_point == Decimal(30)
+    assert tracker.q_ahead_upper == Decimal(30)
+
+
+def test_settle_queue_positions_drops_stale_pending_when_price_changed(env):
+    # Arrange — the tracker has since been requoted to a new price; a pending
+    # decrease for the old price must be dropped without touching the
+    # (unrelated) current tracker state.
+    strategy = _make_strategy(env, enable_trading=True, estimate_queue_position=True)
+    strategy.start()
+
+    tracker = _QueueTracker(
+        price=Decimal("105"),
+        side=OrderSide.SELL,
+        client_order_id=None,
+        q_ahead_point=Decimal(10),
+        q_ahead_upper=Decimal(10),
+        last_level_size=Decimal(10),
+        last_ts_event=5_000,
+    )
+    strategy._queue_trackers[OrderSide.SELL] = tracker
+    strategy._pending_decreases.append(
+        _PendingDecrease(
+            price=Decimal("100"),
+            side=OrderSide.SELL,
+            level_before=Decimal(50),
+            level_after=Decimal(30),
+            window_start_ts_event=1_000,
+            window_end_ts_event=2_000,
+            due_ns=env.clock.timestamp_ns(),
+            retry_due_ns=None,
+        ),
+    )
+
+    # Act
+    strategy._settle_queue_positions()
+
+    # Assert
+    assert len(strategy._pending_decreases) == 0
+    assert tracker.q_ahead_point == Decimal(10)
+    assert tracker.q_ahead_upper == Decimal(10)

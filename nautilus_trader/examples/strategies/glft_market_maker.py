@@ -142,6 +142,50 @@ class MidPriceSample:
     position: str
 
 
+@dataclass
+class _QueueTracker:
+    """
+    Tracks estimated queue position for one resting order at one price.
+    """
+
+    price: Decimal
+    side: OrderSide
+    client_order_id: ClientOrderId | None
+    q_ahead_point: Decimal
+    q_ahead_upper: Decimal
+    last_level_size: Decimal
+    last_ts_event: int
+
+
+@dataclass
+class _TradeCacheRecord:
+    """
+    A cached trade tick at a tracked price, awaiting consumption by a
+    matching decrease.
+    """
+
+    qty: Decimal
+    ts_event: int
+    remaining: Decimal
+
+
+@dataclass
+class _PendingDecrease:
+    """
+    An observed price-level size decrease awaiting settlement against cached
+    trades.
+    """
+
+    price: Decimal
+    side: OrderSide
+    level_before: Decimal
+    level_after: Decimal
+    window_start_ts_event: int
+    window_end_ts_event: int
+    due_ns: int
+    retry_due_ns: int | None
+
+
 @customdataclass
 class GLFTParamsSnapshot(Data):
     """
@@ -328,6 +372,25 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         The maximum interval in seconds between parameter snapshot flushes.
     params_max_buffer_size : PositiveInt, default 100
         The maximum buffered parameter snapshot count before flushing.
+    estimate_queue_position : bool, default False
+        If ``True`` (and ``enable_trading`` is also ``True``), estimate this
+        strategy's queue position at its own bid/ask price from local order
+        book deltas and trade ticks. Purely observational — logs a point
+        estimate (proportional cancel-allocation) and a pessimistic upper
+        bound; does not affect quoting decisions. The match window between a
+        price-level decrease and cached trades is not a fixed radius — it is
+        the real ``ts_event`` interval between the previous and current
+        observed change at that price, since Binance's diff-depth stream only
+        re-sends a level when it actually changes.
+    queue_settle_delay_ms : PositiveFloat, default 100.0
+        Grace period after a level-size decrease is observed before the first
+        attempt to match it against cached trades, so that the independent
+        trade and depth WebSocket streams have time to both arrive.
+    queue_retry_delay_ms : PositiveFloat, default 200.0
+        Additional delay before finalizing a level-size decrease as a pure
+        cancellation when the first matching attempt found no trades.
+    queue_settle_timer_interval_ms : PositiveFloat, default 50.0
+        Polling interval for the queue-position settlement timer.
 
     """
 
@@ -361,6 +424,10 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     dead_band_ticks: PositiveFloat = 1.5
     dead_band_ratio: PositiveFloat = 0.3
     max_requote_interval_secs: PositiveFloat = 300.0
+    estimate_queue_position: bool = False
+    queue_settle_delay_ms: PositiveFloat = 100.0
+    queue_retry_delay_ms: PositiveFloat = 200.0
+    queue_settle_timer_interval_ms: PositiveFloat = 50.0
     instrument_trade_sizes: dict[str, int] = msgspec.field(
         default_factory=lambda: {
             "ETHUSDT-PERP": 1,
@@ -414,6 +481,7 @@ class GLFTMarketMaker(Strategy):
     """
 
     MID_SAMPLE_TIMER_NAME = "mid_price_sample"
+    QUEUE_SETTLE_TIMER_NAME = "queue_position_settle"
 
     def __init__(self, config: GLFTMarketMakerConfig) -> None:
         super().__init__(config)
@@ -467,6 +535,13 @@ class GLFTMarketMaker(Strategy):
         self._last_params_flush_monotonic = time.monotonic()
         # Background executor (max_workers=1 serialises catalog writes)
         self._params_executor: ThreadPoolExecutor | None = None
+        # Queue-position estimation (created/reset in _requote_live when enabled)
+        self._queue_trackers: dict[OrderSide, _QueueTracker | None] = {
+            OrderSide.BUY: None,
+            OrderSide.SELL: None,
+        }
+        self._trade_cache: dict[Decimal, deque[_TradeCacheRecord]] = {}
+        self._pending_decreases: deque[_PendingDecrease] = deque()
 
     def on_start(self) -> None:
         """
@@ -538,6 +613,14 @@ class GLFTMarketMaker(Strategy):
             self.clock.set_timer(
                 name=self.MID_SAMPLE_TIMER_NAME,
                 interval=pd.Timedelta(seconds=self.config.mid_sample_interval_secs),
+                callback=self.on_timer,
+            )
+        if self.config.enable_trading and self.config.estimate_queue_position:
+            self.clock.set_timer(
+                name=self.QUEUE_SETTLE_TIMER_NAME,
+                interval=pd.Timedelta(
+                    milliseconds=self.config.queue_settle_timer_interval_ms,
+                ),
                 callback=self.on_timer,
             )
 
@@ -643,6 +726,10 @@ class GLFTMarketMaker(Strategy):
         """
         Actions to be performed when a timer event is received.
         """
+        if event.name == self.QUEUE_SETTLE_TIMER_NAME:
+            self._settle_queue_positions()
+            return
+
         if event.name != self.MID_SAMPLE_TIMER_NAME:
             return
 
@@ -1251,6 +1338,11 @@ class GLFTMarketMaker(Strategy):
             )
         self.cancel_all_orders(instrument_id)
 
+        queue_tracking = self.config.enable_trading and self.config.estimate_queue_position
+        if queue_tracking:
+            self._reset_queue_tracker(OrderSide.SELL, ask_snap)
+            self._reset_queue_tracker(OrderSide.BUY, bid_snap)
+
         # SELL (ask) suppressed at q=0 to avoid opening a short in one-way mode.
         if not suppress_ask:
             ask_order = self.order_factory.limit(
@@ -1262,6 +1354,8 @@ class GLFTMarketMaker(Strategy):
                 post_only=True,
             )
             self.submit_order(ask_order)
+            if queue_tracking and self._queue_trackers[OrderSide.SELL] is not None:
+                self._queue_trackers[OrderSide.SELL].client_order_id = ask_order.client_order_id
         else:
             self.log.info(
                 "SELL suppressed | at zero position | "
@@ -1279,12 +1373,230 @@ class GLFTMarketMaker(Strategy):
                 post_only=True,
             )
             self.submit_order(bid_order)
+            if queue_tracking and self._queue_trackers[OrderSide.BUY] is not None:
+                self._queue_trackers[OrderSide.BUY].client_order_id = bid_order.client_order_id
         else:
             self.log.info(
                 "BUY suppressed | at max_position | "
                 f"position={self._position} | pending_buy={pending_buy} | "
                 f"trade_size={trade_size} | max_position={max_position}",
             )
+
+    def _reset_queue_tracker(self, side: OrderSide, price: Decimal) -> None:
+        """
+        Create/replace the queue tracker for ``side`` after a cancel+resubmit.
+
+        A genuine cancel+resubmit always sends the order to the back of the
+        queue at the venue, even when the new price equals the old one, so the
+        tracker is unconditionally replaced. Any cached trades for a
+        now-abandoned price are dropped since nothing will use them.
+        """
+        old_tracker = self._queue_trackers[side]
+        if old_tracker is not None and old_tracker.price != price:
+            self._trade_cache.pop(old_tracker.price, None)
+
+        level_size = self._queue_level_size(side, price)
+        self._queue_trackers[side] = _QueueTracker(
+            price=price,
+            side=side,
+            client_order_id=None,
+            q_ahead_point=level_size,
+            q_ahead_upper=level_size,
+            last_level_size=level_size,
+            last_ts_event=self.clock.timestamp_ns(),
+        )
+
+    def _queue_level_size(self, side: OrderSide, price: Decimal) -> Decimal:
+        """
+        Look up the currently resting size at ``price`` on ``side`` of the
+        local order book (0 if the level does not exist or there is no book).
+        """
+        if self._book is None:
+            return Decimal(0)
+
+        levels = self._book.bids() if side == OrderSide.BUY else self._book.asks()
+        for level in levels:
+            if level.price.as_decimal() == price:
+                return Decimal(str(level.size()))
+        return Decimal(0)
+
+    def _cache_trade_for_queue(self, tick: TradeTick) -> None:
+        """
+        Cache ``tick`` for later queue-position matching if it lands at a
+        price currently tracked on either side.
+        """
+        price = tick.price.as_decimal()
+        if not any(
+            tracker is not None and tracker.price == price
+            for tracker in self._queue_trackers.values()
+        ):
+            return
+
+        qty = Decimal(str(tick.size))
+        self._trade_cache.setdefault(price, deque()).append(
+            _TradeCacheRecord(qty=qty, ts_event=tick.ts_event, remaining=qty),
+        )
+
+    def _detect_queue_decreases(self, deltas_ts_event: int) -> None:
+        """
+        Compare each tracked price's current level size against the last
+        observed value, recording a ``_PendingDecrease`` when it shrinks.
+        """
+        for side, tracker in self._queue_trackers.items():
+            if tracker is None:
+                continue
+
+            new_size = self._queue_level_size(side, tracker.price)
+            if new_size == tracker.last_level_size:
+                continue
+
+            if new_size < tracker.last_level_size:
+                pending = _PendingDecrease(
+                    price=tracker.price,
+                    side=side,
+                    level_before=tracker.last_level_size,
+                    level_after=new_size,
+                    window_start_ts_event=tracker.last_ts_event,
+                    window_end_ts_event=deltas_ts_event,
+                    due_ns=self.clock.timestamp_ns()
+                    + int(self.config.queue_settle_delay_ms * 1e6),
+                    retry_due_ns=None,
+                )
+                self._pending_decreases.append(pending)
+                self.log.debug(
+                    "Queue level decrease | "
+                    f"side={side} | price={tracker.price} | "
+                    f"before={pending.level_before} | after={pending.level_after} | "
+                    f"window=[{pending.window_start_ts_event}, {pending.window_end_ts_event}]",
+                )
+
+            tracker.last_level_size = new_size
+            tracker.last_ts_event = deltas_ts_event
+
+    def _settle_queue_positions(self) -> None:
+        """
+        Settle observed price-level decreases against cached trades.
+
+        Each pending decrease waits ``queue_settle_delay_ms`` before its first
+        matching attempt (giving the independent trade/depth streams time to
+        both arrive); if that attempt finds no matching trades it gets one
+        retry after a further ``queue_retry_delay_ms`` before being finalized
+        as a pure cancellation.
+        """
+        if not self._pending_decreases:
+            return
+
+        now = self.clock.timestamp_ns()
+        still_pending: deque[_PendingDecrease] = deque()
+        for pending in self._pending_decreases:
+            check_due_ns = pending.retry_due_ns if pending.retry_due_ns is not None else pending.due_ns
+            if now < check_due_ns:
+                still_pending.append(pending)
+                continue
+
+            tracker = self._queue_trackers[pending.side]
+            if tracker is None or tracker.price != pending.price:
+                # Price no longer tracked (requoted away) — stale, drop.
+                continue
+
+            needed = pending.level_before - pending.level_after
+            matched = self._match_cached_trades(
+                pending.price,
+                pending.window_start_ts_event,
+                pending.window_end_ts_event,
+                needed,
+            )
+
+            if matched == 0 and pending.retry_due_ns is None:
+                pending.retry_due_ns = now + int(self.config.queue_retry_delay_ms * 1e6)
+                still_pending.append(pending)
+                continue
+
+            self._finalize_decrease(tracker, pending, matched)
+
+        self._pending_decreases = still_pending
+
+    def _match_cached_trades(
+        self,
+        price: Decimal,
+        window_start_ts_event: int,
+        window_end_ts_event: int,
+        needed: Decimal,
+    ) -> Decimal:
+        """
+        Consume cached trades at ``price`` within the given ``ts_event``
+        window, FIFO, up to ``needed`` quantity. Fully consumed records are
+        dropped; the rest are kept for future matches.
+        """
+        records = self._trade_cache.get(price)
+        if not records:
+            return Decimal(0)
+
+        matched = Decimal(0)
+        kept: deque[_TradeCacheRecord] = deque()
+        for record in records:
+            still_needed = needed - matched
+            in_window = window_start_ts_event <= record.ts_event <= window_end_ts_event
+            if still_needed <= 0 or not in_window:
+                kept.append(record)
+                continue
+
+            take = min(record.remaining, still_needed)
+            record.remaining -= take
+            matched += take
+            if record.remaining > 0:
+                kept.append(record)
+
+        if kept:
+            self._trade_cache[price] = kept
+        else:
+            self._trade_cache.pop(price, None)
+
+        return matched
+
+    def _finalize_decrease(
+        self,
+        tracker: _QueueTracker,
+        pending: _PendingDecrease,
+        matched: Decimal,
+    ) -> None:
+        """
+        Apply a settled decrease's effect to the tracker's estimates and log
+        the result.
+
+        ``matched`` quantity is treated as fills — deducted outright from
+        both estimates. Any unmatched remainder is treated as cancellations:
+        the point estimate assumes cancels are spread proportionally through
+        the queue (so it shrinks by the same ratio the level itself shrank
+        by), while the pessimistic upper bound assumes cancels happened
+        entirely ahead of us and so is left untouched by the remainder.
+        """
+        needed = pending.level_before - pending.level_after
+        remainder = needed - matched
+
+        tracker.q_ahead_point = max(Decimal(0), tracker.q_ahead_point - matched)
+        denom = pending.level_before - matched
+        if remainder > 0 and denom > 0:
+            ratio = pending.level_after / denom
+            tracker.q_ahead_point *= ratio
+        tracker.q_ahead_upper = max(Decimal(0), tracker.q_ahead_upper - matched)
+
+        own_qty = Decimal(0)
+        if tracker.client_order_id is not None:
+            order = self.cache.order(tracker.client_order_id)
+            if order is not None:
+                own_qty = Decimal(str(order.leaves_qty))
+        cap = max(Decimal(0), pending.level_after - own_qty)
+        tracker.q_ahead_point = min(tracker.q_ahead_point, cap)
+        tracker.q_ahead_upper = min(tracker.q_ahead_upper, cap)
+
+        self.log.info(
+            "Queue position | "
+            f"side={pending.side} | price={pending.price} | "
+            f"matched={matched} | remainder={remainder} | "
+            f"q_ahead_point={tracker.q_ahead_point} | "
+            f"q_ahead_upper={tracker.q_ahead_upper}",
+        )
 
     def _round_to_tick(self, price: Decimal, rounding: str) -> Decimal:
         """
@@ -1437,6 +1749,8 @@ class GLFTMarketMaker(Strategy):
         Actions to be performed when a trade tick is received.
         """
         self._trade_count += 1
+        if self.config.enable_trading and self.config.estimate_queue_position:
+            self._cache_trade_for_queue(tick)
         if self.config.persist_market_data:
             self._trade_buffer.append(tick)
             self._flush_market_data_if_needed()
@@ -1483,6 +1797,8 @@ class GLFTMarketMaker(Strategy):
         self._book_delta_count += len(deltas.deltas)
         if self._book is not None:
             self._book.apply_deltas(deltas)
+            if self.config.enable_trading and self.config.estimate_queue_position:
+                self._detect_queue_decreases(deltas.ts_event)
 
         if self.config.persist_market_data:
             self._book_delta_buffer.extend(deltas.deltas)
