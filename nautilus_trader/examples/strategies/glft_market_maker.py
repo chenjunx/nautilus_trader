@@ -828,6 +828,8 @@ class GLFTMarketMaker(Strategy):
         # q changed — requote immediately without waiting for the next timer tick.
         if self.config.enable_trading:
             self._update_position()
+            if self.config.estimate_queue_position:
+                self._calibrate_queue_tracker(event.client_order_id)
             self._requote_live(reason="fill")
             if self._last_quote is not None:
                 bid = self._last_quote.bid_price.as_decimal()
@@ -837,6 +839,13 @@ class GLFTMarketMaker(Strategy):
     def on_order_canceled(self, event: OrderCanceled) -> None:
         """
         Actions to be performed when an order is canceled.
+
+        Known limitation: an *externally* canceled order (not tagged in
+        ``_pending_self_cancels``) leaves its queue tracker stale — the
+        tracker isn't reset here, so it keeps its pre-cancel q_ahead estimate
+        until the next natural ``_requote_live`` trigger overwrites it. Self-
+        cancels don't have this gap since ``_requote_live`` already replaces
+        the tracker synchronously before the cancel confirmation arrives.
         """
         if event.client_order_id in self._pending_self_cancels:
             self._pending_self_cancels.discard(event.client_order_id)
@@ -1387,6 +1396,27 @@ class GLFTMarketMaker(Strategy):
                 f"trade_size={trade_size} | max_position={max_position}",
             )
 
+    def _calibrate_queue_tracker(self, client_order_id: ClientOrderId) -> None:
+        """
+        Zero the queue tracker matching a fresh fill.
+
+        A fill is hard proof the order reached the head of the queue at that
+        instant, so it's used as a forced calibration point against the
+        estimated q_ahead — the pre-reset values are logged first to gauge
+        model accuracy over time.
+        """
+        for side, tracker in self._queue_trackers.items():
+            if tracker is not None and tracker.client_order_id == client_order_id:
+                self.log.info(
+                    "Queue position calibrated to zero on fill | "
+                    f"side={side} | price={tracker.price} | "
+                    f"q_ahead_point={tracker.q_ahead_point} | "
+                    f"q_ahead_upper={tracker.q_ahead_upper}",
+                )
+                tracker.q_ahead_point = Decimal(0)
+                tracker.q_ahead_upper = Decimal(0)
+                break
+
     def _reset_queue_tracker(self, side: OrderSide, price: Decimal) -> None:
         """
         Create/replace the queue tracker for ``side`` after a cancel+resubmit.
@@ -1494,7 +1524,9 @@ class GLFTMarketMaker(Strategy):
         now = self.clock.timestamp_ns()
         still_pending: deque[_PendingDecrease] = deque()
         for pending in self._pending_decreases:
-            check_due_ns = pending.retry_due_ns if pending.retry_due_ns is not None else pending.due_ns
+            check_due_ns = (
+                pending.retry_due_ns if pending.retry_due_ns is not None else pending.due_ns
+            )
             if now < check_due_ns:
                 still_pending.append(pending)
                 continue
