@@ -178,6 +178,11 @@ def _fire_mid_timer(env, strategy: GLFTMarketMaker) -> None:
 def _make_strategy(env, **overrides) -> GLFTMarketMaker:
     defaults = {
         "instrument_id": env.instrument.id,
+        # quote_intensity_k/quote_arrival_a became required (no default) in
+        # dbaa01063f; kept at their former default values here so the
+        # half-spread numbers baked into this file's assertions don't shift.
+        "quote_intensity_k": 2473.25,
+        "quote_arrival_a": 266.13,
         "bar_type": None,
         "subscribe_quotes": True,
         "subscribe_trades": False,
