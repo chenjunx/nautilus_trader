@@ -72,7 +72,7 @@ bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
 # Configure the trading node for live USDT futures with an execution client.
 config_node = TradingNodeConfig(
     trader_id=TraderId("NEAR-LIVE-MM-001"),
-    logging=LoggingConfig(log_level="DEBUG", use_pyo3=True),
+    logging=LoggingConfig(log_level="INFO", use_pyo3=True),
     data_engine=LiveDataEngineConfig(
         external_clients=[ClientId(BINANCE)],
     ),
