@@ -1256,8 +1256,6 @@ class GLFTMarketMaker(Strategy):
         is True. ``self._position`` is refreshed earlier in the same tick by
         :meth:`_create_mid_price_sample`.
         """
-        self._last_requote_ns = self.clock.timestamp_ns()
-
         if (
             self.instrument is None
             or self._trade_size is None
@@ -1265,6 +1263,13 @@ class GLFTMarketMaker(Strategy):
             or self._last_quote is None
         ):
             return
+
+        # Only stamp the watchdog timer once the strategy is actually ready to
+        # evaluate a quote — stamping it unconditionally (even on this no-op
+        # early return) would let a premature call made before EWMA is seeded
+        # silently consume the watchdog's next window, delaying the real
+        # bootstrap quote by up to `max_requote_interval_secs`.
+        self._last_requote_ns = self.clock.timestamp_ns()
 
         instrument_id = self.config.instrument_id
         bid_dec = self._last_quote.bid_price.as_decimal()
