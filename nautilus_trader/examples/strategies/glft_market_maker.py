@@ -1440,6 +1440,12 @@ class GLFTMarketMaker(Strategy):
             last_level_size=level_size,
             last_ts_event=self.clock.timestamp_ns(),
         )
+        self.log.debug(
+            "Queue tracker reset | "
+            f"side={side} | price={price} | initial_q_ahead={level_size} | "
+            f"prior_price={old_tracker.price if old_tracker is not None else None} | "
+            f"prior_q_ahead_point={old_tracker.q_ahead_point if old_tracker is not None else None}",
+        )
 
     def _queue_level_size(self, side: OrderSide, price: Decimal) -> Decimal:
         """
@@ -1470,6 +1476,10 @@ class GLFTMarketMaker(Strategy):
         qty = Decimal(str(tick.size))
         self._trade_cache.setdefault(price, deque()).append(
             _TradeCacheRecord(qty=qty, ts_event=tick.ts_event, remaining=qty),
+        )
+        self.log.debug(
+            "Trade cached for queue | "
+            f"price={price} | qty={qty} | ts_event={tick.ts_event}",
         )
 
     def _detect_queue_decreases(self, deltas_ts_event: int) -> None:
@@ -1534,6 +1544,11 @@ class GLFTMarketMaker(Strategy):
             tracker = self._queue_trackers[pending.side]
             if tracker is None or tracker.price != pending.price:
                 # Price no longer tracked (requoted away) — stale, drop.
+                self.log.debug(
+                    "Queue pending decrease stale, dropped | "
+                    f"side={pending.side} | price={pending.price} | "
+                    f"before={pending.level_before} | after={pending.level_after}",
+                )
                 continue
 
             needed = pending.level_before - pending.level_after
@@ -1547,6 +1562,11 @@ class GLFTMarketMaker(Strategy):
             if matched == 0 and pending.retry_due_ns is None:
                 pending.retry_due_ns = now + int(self.config.queue_retry_delay_ms * 1e6)
                 still_pending.append(pending)
+                self.log.debug(
+                    "Queue decrease unmatched, scheduling retry | "
+                    f"side={pending.side} | price={pending.price} | "
+                    f"needed={needed} | retry_due_ns={pending.retry_due_ns}",
+                )
                 continue
 
             self._finalize_decrease(tracker, pending, matched)
