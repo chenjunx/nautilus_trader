@@ -1491,6 +1491,12 @@ class GLFTMarketMaker(Strategy):
         """
         Compare each tracked price's current level size against the last
         observed value, recording a ``_PendingDecrease`` when it shrinks.
+
+        ``last_ts_event`` only advances when a decrease actually opens a
+        match window, not on every observation — an intervening increase
+        (fresh size added back) must not push the next window's start past
+        real trades that landed before it, or those trades become
+        permanently unmatchable.
         """
         for side, tracker in self._queue_trackers.items():
             if tracker is None:
@@ -1519,9 +1525,9 @@ class GLFTMarketMaker(Strategy):
                     f"before={pending.level_before} | after={pending.level_after} | "
                     f"window=[{pending.window_start_ts_event}, {pending.window_end_ts_event}]",
                 )
+                tracker.last_ts_event = deltas_ts_event
 
             tracker.last_level_size = new_size
-            tracker.last_ts_event = deltas_ts_event
 
     def _settle_queue_positions(self) -> None:
         """
