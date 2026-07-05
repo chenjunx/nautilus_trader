@@ -494,6 +494,7 @@ class GLFTMarketMaker(Strategy):
         self._book_delta_count = 0
         self._last_quote: QuoteTick | None = None
         self._book: OrderBook | None = None
+        self._last_book_ts_event: int | None = None
         self._catalog: ParquetDataCatalog | None = None
         self._trade_buffer: list[TradeTick] = []
         self._book_delta_buffer: list[OrderBookDelta] = []
@@ -1438,7 +1439,11 @@ class GLFTMarketMaker(Strategy):
             q_ahead_point=level_size,
             q_ahead_upper=level_size,
             last_level_size=level_size,
-            last_ts_event=self.clock.timestamp_ns(),
+            last_ts_event=(
+                self._last_book_ts_event
+                if self._last_book_ts_event is not None
+                else self.clock.timestamp_ns()
+            ),
         )
         self.log.info(
             "Queue tracker reset | "
@@ -1854,6 +1859,7 @@ class GLFTMarketMaker(Strategy):
         self._book_delta_count += len(deltas.deltas)
         if self._book is not None:
             self._book.apply_deltas(deltas)
+            self._last_book_ts_event = deltas.ts_event
             if self.config.enable_trading and self.config.estimate_queue_position:
                 self._detect_queue_decreases(deltas.ts_event)
 
