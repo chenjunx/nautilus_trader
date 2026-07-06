@@ -1331,6 +1331,26 @@ class GLFTMarketMaker(Strategy):
         bid_snap = self._round_to_tick(bid_raw, ROUND_FLOOR)
         ask_snap = self._round_to_tick(ask_raw, ROUND_CEILING)
 
+        # Cross-guard: the inventory skew in `reservation` can push a quote
+        # past the current opposite touch when |position| is large. Binance
+        # rejects a crossing post-only order as EXPIRED, which would otherwise
+        # fire every tick at exactly the moment the position most needs to be
+        # worked off. Clamp each side to its own side of the current market
+        # instead — this caps how aggressively skew can chase inventory down,
+        # trading some unwind speed for never being rejected.
+        if ask_snap <= bid_dec:
+            self.log.warning(
+                "Clamp ask to avoid crossing market | "
+                f"ask={ask_snap} | best_bid={bid_dec} | tick={tick}",
+            )
+            ask_snap = bid_dec + tick
+        if bid_snap >= ask_dec:
+            self.log.warning(
+                "Clamp bid to avoid crossing market | "
+                f"bid={bid_snap} | best_ask={ask_dec} | tick={tick}",
+            )
+            bid_snap = ask_dec - tick
+
         # Skip the cancel/resubmit cycle when resting orders already reflect
         # the target prices — avoids unnecessary churn when the mid hasn't
         # moved between timer ticks.

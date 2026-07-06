@@ -342,6 +342,28 @@ def test_min_spread_guard_skips_quoting(env):
     assert len(env.cache.orders_open(instrument_id=env.instrument.id)) == 0
 
 
+def test_cross_guard_clamps_ask_when_skew_would_cross_best_bid(env):
+    # Arrange — a huge long position pushes reservation far below mid (skew
+    # dominates once max_g_ratio's cap on the offset is applied), which would
+    # put the naive ask below the current best bid. `_update_position` is
+    # stubbed so the huge position survives both sample cycles instead of
+    # being recomputed from the (empty) cache.
+    strategy = _make_strategy(env, enable_trading=True)
+    strategy.start()
+    strategy._update_position = lambda: None
+    strategy._position = Decimal("1000")
+
+    # Act
+    _seed_then_quote(env, strategy, delta=0.2)
+
+    # Assert — best_bid = moved_mid - 0.1 = 40000.1, tick = 0.1
+    orders = env.cache.orders_open(instrument_id=env.instrument.id)
+    sell = next(o for o in orders if o.side == OrderSide.SELL)
+    buys = [o for o in orders if o.side == OrderSide.BUY]
+    assert sell.price.as_decimal() == Decimal("40000.2")
+    assert buys == []  # suppressed: position already far above max_position
+
+
 # -------------------------------------------------------------------------------------------------
 # Queue-position estimation (`_settle_queue_positions` and friends)
 #
