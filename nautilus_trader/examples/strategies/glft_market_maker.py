@@ -208,6 +208,24 @@ class GLFTParamsSnapshot(Data):
     rls_enabled: bool
 
 
+@customdataclass
+class QueueFillSample(Data):
+    """
+    A catalog-persistable record of the estimated queue position at the
+    moment a resting order reaches a fill — an alternative to parsing
+    free-text logs for offline queue-model accuracy analysis.
+    """
+
+    instrument_id: InstrumentId
+    side: str
+    price: str
+    q_ahead_point: str
+    q_ahead_upper: str
+    q_behind_point: str
+    denom: str
+    rho: str | None
+
+
 class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     """
     Configuration for ``GLFTMarketMaker`` instances.
@@ -830,7 +848,7 @@ class GLFTMarketMaker(Strategy):
         if self.config.enable_trading:
             self._update_position()
             if self.config.estimate_queue_position:
-                self._calibrate_queue_tracker(event.client_order_id)
+                self._calibrate_queue_tracker(event)
             self._requote_live(reason="fill")
             if self._last_quote is not None:
                 bid = self._last_quote.bid_price.as_decimal()
@@ -1397,22 +1415,44 @@ class GLFTMarketMaker(Strategy):
                 f"trade_size={trade_size} | max_position={max_position}",
             )
 
-    def _calibrate_queue_tracker(self, client_order_id: ClientOrderId) -> None:
+    def _calibrate_queue_tracker(self, event: OrderFilled) -> None:
         """
         Zero the queue tracker matching a fresh fill.
 
         A fill is hard proof the order reached the head of the queue at that
         instant, so it's used as a forced calibration point against the
-        estimated q_ahead — the pre-reset values are logged first to gauge
-        model accuracy over time.
+        estimated q_ahead — the pre-reset values are logged and persisted
+        first to gauge model accuracy over time.
         """
         for side, tracker in self._queue_trackers.items():
-            if tracker is not None and tracker.client_order_id == client_order_id:
+            if tracker is not None and tracker.client_order_id == event.client_order_id:
+                level_size = self._queue_level_size(side, tracker.price)
+                own_qty = self._tracker_own_qty(tracker)
+                q_behind_point = max(Decimal(0), level_size - own_qty - tracker.q_ahead_point)
+                denom = tracker.q_ahead_point + own_qty + q_behind_point
+                rho = tracker.q_ahead_point / denom if denom > 0 else None
                 self.log.info(
                     "Queue position calibrated to zero on fill | "
                     f"side={side} | price={tracker.price} | "
                     f"q_ahead_point={tracker.q_ahead_point} | "
-                    f"q_ahead_upper={tracker.q_ahead_upper}",
+                    f"q_ahead_upper={tracker.q_ahead_upper} | "
+                    f"q_behind_point={q_behind_point} | "
+                    f"denom={denom} | "
+                    f"rho={rho}",
+                )
+                self._persist_queue_fill_sample(
+                    QueueFillSample(
+                        instrument_id=self.config.instrument_id,
+                        side=str(side),
+                        price=str(tracker.price),
+                        q_ahead_point=str(tracker.q_ahead_point),
+                        q_ahead_upper=str(tracker.q_ahead_upper),
+                        q_behind_point=str(q_behind_point),
+                        denom=str(denom),
+                        rho=str(rho) if rho is not None else None,
+                        ts_event=event.ts_event,
+                        ts_init=self.clock.timestamp_ns(),
+                    ),
                 )
                 tracker.q_ahead_point = Decimal(0)
                 tracker.q_ahead_upper = Decimal(0)
@@ -1448,6 +1488,7 @@ class GLFTMarketMaker(Strategy):
         self.log.info(
             "Queue tracker reset | "
             f"side={side} | price={price} | initial_q_ahead={level_size} | "
+            f"initial_q_behind={self._queue_behind(self._queue_trackers[side], level_size)} | "
             f"prior_price={old_tracker.price if old_tracker is not None else None} | "
             f"prior_q_ahead_point={old_tracker.q_ahead_point if old_tracker is not None else None}",
         )
@@ -1465,6 +1506,27 @@ class GLFTMarketMaker(Strategy):
             if level.price.as_decimal() == price:
                 return Decimal(str(level.size()))
         return Decimal(0)
+
+    def _tracker_own_qty(self, tracker: _QueueTracker) -> Decimal:
+        """
+        Look up the current leaves_qty of the order a tracker is following (0
+        if unassigned or no longer in the cache).
+        """
+        if tracker.client_order_id is None:
+            return Decimal(0)
+        order = self.cache.order(tracker.client_order_id)
+        if order is None:
+            return Decimal(0)
+        return Decimal(str(order.leaves_qty))
+
+    def _queue_behind(self, tracker: _QueueTracker, level_size: Decimal) -> Decimal:
+        """
+        Point estimate of the quantity resting behind ``tracker``'s order at
+        its price, derived from the level size, own leaves_qty, and the
+        current q_ahead_point — not independently tracked.
+        """
+        own_qty = self._tracker_own_qty(tracker)
+        return max(Decimal(0), level_size - own_qty - tracker.q_ahead_point)
 
     def _cache_trade_for_queue(self, tick: TradeTick) -> None:
         """
@@ -1649,11 +1711,7 @@ class GLFTMarketMaker(Strategy):
             tracker.q_ahead_point *= ratio
         tracker.q_ahead_upper = max(Decimal(0), tracker.q_ahead_upper - matched)
 
-        own_qty = Decimal(0)
-        if tracker.client_order_id is not None:
-            order = self.cache.order(tracker.client_order_id)
-            if order is not None:
-                own_qty = Decimal(str(order.leaves_qty))
+        own_qty = self._tracker_own_qty(tracker)
         cap = max(Decimal(0), pending.level_after - own_qty)
         tracker.q_ahead_point = min(tracker.q_ahead_point, cap)
         tracker.q_ahead_upper = min(tracker.q_ahead_upper, cap)
@@ -1663,7 +1721,8 @@ class GLFTMarketMaker(Strategy):
             f"side={pending.side} | price={pending.price} | "
             f"matched={matched} | remainder={remainder} | "
             f"q_ahead_point={tracker.q_ahead_point} | "
-            f"q_ahead_upper={tracker.q_ahead_upper}",
+            f"q_ahead_upper={tracker.q_ahead_upper} | "
+            f"q_behind_point={self._queue_behind(tracker, pending.level_after)}",
         )
 
     def _round_to_tick(self, price: Decimal, rounding: str) -> Decimal:
@@ -1811,6 +1870,38 @@ class GLFTMarketMaker(Strategy):
         data = sorted(buf, key=lambda x: x.ts_init)
         self._catalog.write_data(data, skip_disjoint_check=True)
         self.log.info(f"Flushed {len(data)} param snapshots")
+
+    def _persist_queue_fill_sample(self, sample: QueueFillSample) -> None:
+        """
+        Write a single queue-fill sample to the catalog on the background
+        executor.
+
+        Fills are rare enough (unlike quotes/params) that no size/time
+        buffering is needed — each one is submitted for an async write as
+        soon as it's calibrated.
+        """
+        if not self.config.persist_params or self._catalog is None:
+            return
+
+        if self._params_executor is not None:
+            self._params_executor.submit(self._flush_queue_fill_worker, [sample])
+        else:
+            # Fallback: run inline when executor was shut down (e.g. during tests).
+            self._flush_queue_fill_worker([sample])
+
+    def _flush_queue_fill_worker(self, buf: list[QueueFillSample]) -> None:
+        """
+        Background worker: write buffered queue-fill samples to the catalog.
+
+        ``QueueFillSample`` is its own Parquet dataset type (catalog
+        partitions by type), so this cannot race with the param-snapshot or
+        market-data writes.
+        """
+        if self._catalog is None:
+            return
+
+        self._catalog.write_data(buf, skip_disjoint_check=True)
+        self.log.info(f"Flushed {len(buf)} queue fill samples")
 
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
