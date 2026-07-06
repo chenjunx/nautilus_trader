@@ -223,7 +223,7 @@ class QueueFillSample(Data):
     q_ahead_upper: str
     q_behind_point: str
     denom: str
-    rho: str | None
+    rho: str
 
 
 class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
@@ -1449,7 +1449,7 @@ class GLFTMarketMaker(Strategy):
                         q_ahead_upper=str(tracker.q_ahead_upper),
                         q_behind_point=str(q_behind_point),
                         denom=str(denom),
-                        rho=str(rho) if rho is not None else None,
+                        rho=str(rho) if rho is not None else "",
                         ts_event=event.ts_event,
                         ts_init=self.clock.timestamp_ns(),
                     ),
