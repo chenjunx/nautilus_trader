@@ -20,7 +20,9 @@ from decimal import ROUND_CEILING
 from decimal import ROUND_FLOOR
 from decimal import ROUND_HALF_UP
 from decimal import Decimal
+import json
 import math
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -64,6 +66,8 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.trading.strategy import Strategy
+
+from nautilus_trader.examples.strategies import glft_lookup_table
 
 
 class _RLSEstimator:
@@ -140,6 +144,9 @@ class MidPriceSample:
     quote_spread: str | None
     quote_prices: dict[int, dict[str, str | None]] | None
     position: str
+    micro_price: str | None
+    micro_price_i_bucket: int | None
+    micro_price_s_bucket: int | None
 
 
 @dataclass
@@ -474,6 +481,11 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     persist_params: bool = True
     params_flush_interval_secs: PositiveFloat = 5.0
     params_max_buffer_size: PositiveInt = 100
+    enable_lookup_table: bool = False
+    lookup_table_window_days: PositiveInt = 7
+    lookup_table_recompute_interval_secs: PositiveFloat = 86400.0
+    lookup_table_output_dir: str | None = None
+    lookup_table_stale_after_days: PositiveFloat = 2.0
 
 
 class GLFTMarketMaker(Strategy):
@@ -500,6 +512,7 @@ class GLFTMarketMaker(Strategy):
 
     MID_SAMPLE_TIMER_NAME = "mid_price_sample"
     QUEUE_SETTLE_TIMER_NAME = "queue_position_settle"
+    LOOKUP_TABLE_TIMER_NAME = "lookup_table_recompute"
 
     def __init__(self, config: GLFTMarketMakerConfig) -> None:
         super().__init__(config)
@@ -561,6 +574,17 @@ class GLFTMarketMaker(Strategy):
         }
         self._trade_cache: dict[Decimal, deque[_TradeCacheRecord]] = {}
         self._pending_decreases: deque[_PendingDecrease] = deque()
+        # Daily G* imbalance lookup table (compute + cache only; not read by
+        # quoting logic yet). Written by background thread, read by main
+        # thread — dict reference assignment is atomic under the GIL.
+        self._lookup_table: dict | None = None
+        self._lookup_table_executor: ThreadPoolExecutor | None = None
+        # Micro-price (mid + G*(I_bucket, s_bucket)) recomputed on every quote
+        # tick from the current lookup table. Compute + record only — not
+        # read by quoting logic yet.
+        self._micro_price: Decimal | None = None
+        self._micro_price_i_bucket: int | None = None
+        self._micro_price_s_bucket: int | None = None
 
     def on_start(self) -> None:
         """
@@ -722,24 +746,133 @@ class GLFTMarketMaker(Strategy):
                 f"redis={'yes' if self._rls_redis is not None else 'no'}",
             )
 
+        if self.config.enable_lookup_table:
+            if not (self.config.persist_market_data and self.config.subscribe_book_deltas):
+                self.log.warning(
+                    "enable_lookup_table=True but persist_market_data/"
+                    "subscribe_book_deltas is off — no order_book_deltas will "
+                    "be available in the catalog to compute from",
+                )
+
+            self._lookup_table_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="lookup-table",
+            )
+
+            output_dir = self.config.lookup_table_output_dir or os.path.join(
+                self.config.catalog_path,
+                os.pardir,
+                "lookup_table",
+            )
+            table_path = os.path.join(output_dir, "final_lookup_table.json")
+            try:
+                with open(table_path) as f:
+                    cached = json.load(f)
+                computed_at_ns = cached.get("computed_at_ns")
+                age_days = (
+                    (pd.Timestamp.now(tz="UTC").value - computed_at_ns) / 1e9 / 86400
+                    if computed_at_ns is not None
+                    else None
+                )
+                if age_days is not None and age_days <= self.config.lookup_table_stale_after_days:
+                    self._lookup_table = cached
+                    self.log.info(
+                        f"Lookup table loaded from cache | path={table_path} | "
+                        f"age_days={age_days:.2f}",
+                    )
+                else:
+                    self.log.warning(
+                        f"Lookup table cache stale or missing timestamp | "
+                        f"path={table_path} | age_days={age_days} | "
+                        "will recompute on startup",
+                    )
+            except (OSError, ValueError) as exc:
+                self.log.info(
+                    f"No usable lookup table cache found | path={table_path} | {exc} | "
+                    "will compute on startup",
+                )
+
+            self.clock.set_timer(
+                name=self.LOOKUP_TABLE_TIMER_NAME,
+                interval=pd.Timedelta(
+                    seconds=self.config.lookup_table_recompute_interval_secs,
+                ),
+                callback=self.on_timer,
+                fire_immediately=self._lookup_table is None,
+            )
+            self.log.info(
+                "Lookup table job ENABLED | "
+                f"window_days={self.config.lookup_table_window_days} | "
+                f"recompute_interval_secs={self.config.lookup_table_recompute_interval_secs} | "
+                f"output_dir={output_dir} | "
+                f"cache_loaded={self._lookup_table is not None}",
+            )
+
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """
         Actions to be performed when a quote tick is received.
         """
         self._quote_count += 1
         self._last_quote = tick
+        self._update_micro_price(tick)
         spread = tick.ask_price - tick.bid_price
+        micro_price_log = (
+            f" | micro_price={self._micro_price} | "
+            f"micro_price_i_bucket={self._micro_price_i_bucket} | "
+            f"micro_price_s_bucket={self._micro_price_s_bucket}"
+            if self._micro_price is not None
+            else ""
+        )
         self.log.info(
             "Quote tick | "
             f"instrument_id={tick.instrument_id} | "
             f"bid={tick.bid_price} | "
             f"ask={tick.ask_price} | "
             f"spread={spread} | "
-            f"count={self._quote_count}",
+            f"count={self._quote_count}"
+            f"{micro_price_log}",
         )
 
         if self.config.enable_trading and self.config.enable_dead_band:
             self._check_dead_band(tick)
+
+    def _update_micro_price(self, tick: QuoteTick) -> None:
+        """
+        Recompute the micro-price (mid + G*(I_bucket, s_bucket)) from the
+        current quote tick and the cached lookup table.
+
+        Compute + record only: does not feed into reservation-price or
+        quote-price calculations. Leaves the previous value in place on any
+        guard failure (no lookup table yet, missing instrument, degenerate
+        sizes, or a malformed cached table) rather than clearing it.
+        """
+        if self._lookup_table is None or self.instrument is None:
+            return
+
+        bid_qty = float(tick.bid_size)
+        ask_qty = float(tick.ask_size)
+        if bid_qty + ask_qty <= 0:
+            return
+
+        table_i_by_s = self._lookup_table.get("table_I_by_S")
+        if not table_i_by_s:
+            return
+
+        tick_size = float(self.instrument.price_increment.as_decimal())
+        bid_px = float(tick.bid_price.as_decimal())
+        ask_px = float(tick.ask_price.as_decimal())
+        i_bucket, s_bucket, _ = glft_lookup_table.compute_live_state(
+            bid_qty, ask_qty, bid_px, ask_px, tick_size,
+        )
+
+        if i_bucket >= len(table_i_by_s) or s_bucket >= len(table_i_by_s[i_bucket]):
+            return
+        g_star = table_i_by_s[i_bucket][s_bucket]
+
+        mid = (tick.bid_price.as_decimal() + tick.ask_price.as_decimal()) / Decimal("2")
+        self._micro_price = mid + Decimal(str(g_star))
+        self._micro_price_i_bucket = i_bucket
+        self._micro_price_s_bucket = s_bucket
 
     def on_timer(self, event: TimeEvent) -> None:
         """
@@ -747,6 +880,10 @@ class GLFTMarketMaker(Strategy):
         """
         if event.name == self.QUEUE_SETTLE_TIMER_NAME:
             self._settle_queue_positions()
+            return
+
+        if event.name == self.LOOKUP_TABLE_TIMER_NAME:
+            self._lookup_table_recompute()
             return
 
         if event.name != self.MID_SAMPLE_TIMER_NAME:
@@ -925,6 +1062,9 @@ class GLFTMarketMaker(Strategy):
             quote_spread=self._quote_spread,
             quote_prices=self._quote_prices,
             position=str(self._position),
+            micro_price=str(self._micro_price) if self._micro_price is not None else None,
+            micro_price_i_bucket=self._micro_price_i_bucket,
+            micro_price_s_bucket=self._micro_price_s_bucket,
         )
 
     def _update_ewma_delta_s_var(self, mid: Decimal) -> Decimal | None:
@@ -1234,6 +1374,103 @@ class GLFTMarketMaker(Strategy):
             "RLS update | "
             f"k={k_new:.1f} | a={a_new:.6f} | "
             f"window_trades={len(buf)} | depth_levels={len(depth_counts)}",
+        )
+
+    def _lookup_table_recompute(self) -> None:
+        """
+        Coordinator (main thread): submit a lookup-table recompute job to the
+        background executor.
+
+        Mirrors ``_rls_update`` — the heavy replay/matrix work happens in
+        ``_lookup_table_worker`` so the event loop is never blocked. The
+        result lands in ``self._lookup_table`` (the cache) asynchronously.
+        """
+        if self.instrument is None:
+            return
+
+        tick_size = float(self.instrument.price_increment.as_decimal())
+        instrument_id = self.config.instrument_id.value
+        catalog_path = self.config.catalog_path
+        window_days = self.config.lookup_table_window_days
+        output_dir = self.config.lookup_table_output_dir or os.path.join(
+            catalog_path,
+            os.pardir,
+            "lookup_table",
+        )
+
+        if self._lookup_table_executor is not None:
+            self._lookup_table_executor.submit(
+                self._lookup_table_worker,
+                catalog_path,
+                instrument_id,
+                tick_size,
+                window_days,
+                output_dir,
+            )
+        else:
+            # Fallback: run inline when executor was shut down (e.g. during tests).
+            self._lookup_table_worker(catalog_path, instrument_id, tick_size, window_days, output_dir)
+
+    def _lookup_table_worker(
+        self,
+        catalog_path: str,
+        instrument_id: str,
+        tick_size: float,
+        window_days: int,
+        output_dir: str,
+    ) -> None:
+        """
+        Background worker: compute the G* imbalance lookup table over the
+        trailing ``window_days`` and cache it to disk and in-memory.
+
+        Runs in a single-worker ``ThreadPoolExecutor`` — never concurrent
+        with itself. Writes to ``self._lookup_table`` are dict reference
+        assignments, atomic under Python's GIL, safe for the main thread to
+        read at any time without explicit locking.
+
+        Any failure (including "no data in window yet") is caught, logged,
+        and leaves the previous ``self._lookup_table`` value untouched —
+        compute + cache is best-effort and must never take the strategy down
+        or blind it by clearing a previously good cache.
+        """
+        start = time.monotonic()
+        try:
+            table = glft_lookup_table.compute_lookup_table(
+                catalog_path=catalog_path,
+                instrument_id=instrument_id,
+                tick_size=tick_size,
+                window_days=window_days,
+            )
+        except Exception as exc:
+            self.log.warning(
+                f"Lookup table recompute failed | instrument_id={instrument_id} | "
+                f"window_days={window_days} | {exc} | keeping previous cache",
+            )
+            return
+
+        elapsed = time.monotonic() - start
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            table_path = os.path.join(output_dir, "final_lookup_table.json")
+            tmp_path = table_path + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(table, f)
+            os.replace(tmp_path, table_path)
+        except OSError as exc:
+            self.log.warning(f"Lookup table cache write failed | {exc}")
+
+        # Atomic cache write (GIL-protected object reference assignment).
+        self._lookup_table = table
+
+        reliability = table.get("reliability_metadata", {})
+        self.log.info(
+            "Lookup table recompute | "
+            f"instrument_id={instrument_id} | elapsed_secs={elapsed:.1f} | "
+            f"window_days={window_days} | "
+            f"n_unreliable={reliability.get('n_unreliable')} | "
+            f"converged={table.get('converged')} | n_iters={table.get('n_iters')} | "
+            f"residual={table.get('health', {}).get('residual')}",
         )
 
     def _check_dead_band(self, tick: QuoteTick) -> None:
@@ -2073,3 +2310,9 @@ class GLFTMarketMaker(Strategy):
         if self._params_executor is not None:
             self._params_executor.shutdown(wait=True)
             self._params_executor = None
+
+        # Wait for any in-flight lookup-table recompute to finish so the
+        # final cache is written before the process exits.
+        if self._lookup_table_executor is not None:
+            self._lookup_table_executor.shutdown(wait=True)
+            self._lookup_table_executor = None

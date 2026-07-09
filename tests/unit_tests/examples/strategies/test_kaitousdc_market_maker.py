@@ -31,8 +31,10 @@ These tests require the compiled Cython extensions to run.
 
 from collections import deque
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from nautilus_trader.backtest.data_client import BacktestMarketDataClient
@@ -46,6 +48,7 @@ from nautilus_trader.common.component import TestClock
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.data.engine import DataEngine
+from nautilus_trader.examples.strategies import glft_market_maker
 from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMaker
 from nautilus_trader.examples.strategies.glft_market_maker import GLFTMarketMakerConfig
 from nautilus_trader.examples.strategies.glft_market_maker import _PendingDecrease
@@ -594,3 +597,310 @@ def test_settle_queue_positions_drops_stale_pending_when_price_changed(env):
     assert len(strategy._pending_decreases) == 0
     assert tracker.q_ahead_point == Decimal(10)
     assert tracker.q_ahead_upper == Decimal(10)
+
+
+# -------------------------------------------------------------------------------------------------
+# Daily G* lookup-table compute + cache job (compute/cache only — not wired into
+# quoting yet). Mirrors the RLS coordinator/worker pattern: `_lookup_table_recompute`
+# (main thread) submits to `_lookup_table_executor`, `_lookup_table_worker` (background
+# thread) does the heavy lifting. Setting the executor to None after `start()` forces
+# `_lookup_table_recompute` down its synchronous fallback path so these tests don't
+# need a real ThreadPoolExecutor or real order_book_deltas catalog data.
+# -------------------------------------------------------------------------------------------------
+
+
+def test_lookup_table_disabled_by_default_registers_no_timer(env):
+    # Arrange / Act
+    strategy = _make_strategy(env, enable_lookup_table=False)
+    strategy.start()
+
+    # Assert
+    assert strategy.LOOKUP_TABLE_TIMER_NAME not in strategy.clock.timer_names()
+    assert strategy._lookup_table is None
+    assert strategy._lookup_table_executor is None
+
+
+def test_lookup_table_enabled_registers_timer_and_tolerates_missing_cache(env, tmp_path):
+    # Arrange / Act — no cache file exists at lookup_table_output_dir, and
+    # catalog_path doesn't even exist yet; on_start must not raise.
+    strategy = _make_strategy(
+        env,
+        enable_lookup_table=True,
+        catalog_path=str(tmp_path / "catalog"),
+        lookup_table_output_dir=str(tmp_path / "lookup_table"),
+    )
+    strategy.start()
+
+    # Assert
+    assert strategy.LOOKUP_TABLE_TIMER_NAME in strategy.clock.timer_names()
+    assert strategy._lookup_table is None
+    assert strategy._lookup_table_executor is not None
+
+
+def test_lookup_table_loads_fresh_cache_on_start(env, tmp_path):
+    # Arrange — a cache file "computed" just now (well within the default
+    # 2-day staleness window) should be loaded synchronously at startup.
+    # Staleness is judged against real wall-clock time (on_start doesn't use
+    # the strategy's injected TestClock for this), not env.clock.
+    output_dir = tmp_path / "lookup_table"
+    output_dir.mkdir()
+    now_ns = pd.Timestamp.now(tz="UTC").value
+    cached_table = {"computed_at_ns": now_ns, "converged": True}
+    (output_dir / "final_lookup_table.json").write_text(json.dumps(cached_table))
+
+    # Act
+    strategy = _make_strategy(
+        env,
+        enable_lookup_table=True,
+        catalog_path=str(tmp_path / "catalog"),
+        lookup_table_output_dir=str(output_dir),
+    )
+    strategy.start()
+
+    # Assert — cache hit means no immediate recompute is scheduled.
+    assert strategy._lookup_table == cached_table
+    assert strategy.clock.next_time_ns(strategy.LOOKUP_TABLE_TIMER_NAME) is not None
+
+
+def test_lookup_table_ignores_stale_cache_on_start(env, tmp_path):
+    # Arrange — a cache file older than lookup_table_stale_after_days must be
+    # ignored (logged, not loaded) so a stale table can never silently persist.
+    # Staleness is judged against real wall-clock time, not env.clock.
+    output_dir = tmp_path / "lookup_table"
+    output_dir.mkdir()
+    stale_ns = pd.Timestamp.now(tz="UTC").value - int(5 * 86400 * 1e9)  # 5 days old
+    (output_dir / "final_lookup_table.json").write_text(
+        json.dumps({"computed_at_ns": stale_ns, "converged": True}),
+    )
+
+    # Act
+    strategy = _make_strategy(
+        env,
+        enable_lookup_table=True,
+        catalog_path=str(tmp_path / "catalog"),
+        lookup_table_output_dir=str(output_dir),
+        lookup_table_stale_after_days=2.0,
+    )
+    strategy.start()
+
+    # Assert
+    assert strategy._lookup_table is None
+
+
+def test_lookup_table_timer_dispatches_to_recompute(env, tmp_path, monkeypatch):
+    # Arrange
+    strategy = _make_strategy(
+        env,
+        enable_lookup_table=True,
+        catalog_path=str(tmp_path / "catalog"),
+        lookup_table_output_dir=str(tmp_path / "lookup_table"),
+    )
+    strategy.start()
+    calls = []
+    monkeypatch.setattr(strategy, "_lookup_table_recompute", lambda: calls.append(1))
+
+    # Act
+    ts = _next_ts(env)
+    event = TimeEvent(strategy.LOOKUP_TABLE_TIMER_NAME, UUID4(), ts, ts)
+    strategy.on_timer(event)
+
+    # Assert
+    assert calls == [1]
+
+
+def test_lookup_table_worker_updates_cache_and_writes_file(env, tmp_path, monkeypatch):
+    # Arrange — stub out the heavy compute_lookup_table entrypoint so this
+    # test exercises only the coordinator/worker wiring, not the real
+    # order-book replay/matrix math (covered separately against real catalog
+    # data, not as a fast unit test).
+    output_dir = tmp_path / "lookup_table"
+    fake_table = {
+        "computed_at_ns": 123,
+        "converged": True,
+        "n_iters": 3,
+        "health": {"residual": 1e-12},
+        "reliability_metadata": {"n_unreliable": 2},
+    }
+    calls = {}
+
+    def fake_compute_lookup_table(**kwargs):
+        calls.update(kwargs)
+        return fake_table
+
+    monkeypatch.setattr(
+        glft_market_maker.glft_lookup_table,
+        "compute_lookup_table",
+        fake_compute_lookup_table,
+    )
+
+    strategy = _make_strategy(
+        env,
+        enable_lookup_table=True,
+        catalog_path=str(tmp_path / "catalog"),
+        lookup_table_output_dir=str(output_dir),
+        lookup_table_window_days=7,
+    )
+    strategy.start()
+    # Force the synchronous fallback path (no live background thread needed).
+    strategy._lookup_table_executor.shutdown(wait=True)
+    strategy._lookup_table_executor = None
+
+    # Act
+    strategy._lookup_table_recompute()
+
+    # Assert
+    assert strategy._lookup_table == fake_table
+    assert calls["instrument_id"] == env.instrument.id.value
+    assert calls["window_days"] == 7
+    written = json.loads((output_dir / "final_lookup_table.json").read_text())
+    assert written == fake_table
+
+
+def test_lookup_table_worker_keeps_previous_cache_on_failure(env, tmp_path, monkeypatch):
+    # Arrange — a recompute that raises must not clear an already-good cache;
+    # it's better to keep serving yesterday's table than go blank.
+    def raising_compute_lookup_table(**kwargs):
+        raise ValueError("no order_book_deltas found in window")
+
+    monkeypatch.setattr(
+        glft_market_maker.glft_lookup_table,
+        "compute_lookup_table",
+        raising_compute_lookup_table,
+    )
+
+    strategy = _make_strategy(
+        env,
+        enable_lookup_table=True,
+        catalog_path=str(tmp_path / "catalog"),
+        lookup_table_output_dir=str(tmp_path / "lookup_table"),
+    )
+    strategy.start()
+    strategy._lookup_table_executor.shutdown(wait=True)
+    strategy._lookup_table_executor = None
+    sentinel = {"converged": True}
+    strategy._lookup_table = sentinel
+
+    # Act
+    strategy._lookup_table_recompute()
+
+    # Assert
+    assert strategy._lookup_table is sentinel
+
+
+# -------------------------------------------------------------------------------------------------
+# Micro-price (mid + G*(I_bucket, s_bucket)) — compute + record only, not read by quoting logic.
+# -------------------------------------------------------------------------------------------------
+
+
+def _make_table_i_by_s(default=0.0) -> list:
+    return [[default, default] for _ in range(10)]
+
+
+def test_micro_price_not_computed_without_lookup_table(env):
+    # Arrange — no lookup table has been loaded/computed yet.
+    strategy = _make_strategy(env)
+    strategy.start()
+    assert strategy._lookup_table is None
+
+    ts = _next_ts(env)
+    tick = TestDataStubs.quote_tick(
+        instrument=env.instrument,
+        bid_price=40000.0,
+        ask_price=40000.1,
+        ts_event=ts,
+        ts_init=ts,
+    )
+
+    # Act
+    strategy.on_quote_tick(tick)
+
+    # Assert
+    assert strategy._micro_price is None
+    assert strategy._micro_price_i_bucket is None
+    assert strategy._micro_price_s_bucket is None
+
+
+def test_micro_price_computed_from_quote_tick(env):
+    # Arrange — bid_qty=750, ask_qty=250 -> I=0.75 -> I_bucket=7; bid=40000.0,
+    # ask=40000.1, tick=0.1 -> spread_ticks=1 -> s_bucket=0.
+    strategy = _make_strategy(env)
+    strategy.start()
+    table = _make_table_i_by_s()
+    table[7][0] = 0.05
+    strategy._lookup_table = {"table_I_by_S": table}
+
+    ts = _next_ts(env)
+    tick = TestDataStubs.quote_tick(
+        instrument=env.instrument,
+        bid_price=40000.0,
+        ask_price=40000.1,
+        bid_size=750,
+        ask_size=250,
+        ts_event=ts,
+        ts_init=ts,
+    )
+
+    # Act
+    strategy.on_quote_tick(tick)
+
+    # Assert — mid = 40000.05, G* = 0.05 -> micro_price = 40000.10
+    assert strategy._micro_price == Decimal("40000.10")
+    assert strategy._micro_price_i_bucket == 7
+    assert strategy._micro_price_s_bucket == 0
+
+
+def test_micro_price_bucket_edges(env):
+    # Arrange
+    strategy = _make_strategy(env)
+    strategy.start()
+    strategy._lookup_table = {"table_I_by_S": _make_table_i_by_s()}
+
+    def quote(bid_size, ask_size, bid_price, ask_price):
+        ts = _next_ts(env)
+        tick = TestDataStubs.quote_tick(
+            instrument=env.instrument,
+            bid_price=bid_price,
+            ask_price=ask_price,
+            bid_size=bid_size,
+            ask_size=ask_size,
+            ts_event=ts,
+            ts_init=ts,
+        )
+        strategy.on_quote_tick(tick)
+
+    # Act/Assert — nearly all size on the ask side -> I near 0 -> I_bucket=0.
+    quote(1, 999, 40000.0, 40000.1)
+    assert strategy._micro_price_i_bucket == 0
+
+    # nearly all size on the bid side -> I near 1 -> I_bucket=9 (clipped).
+    quote(999, 1, 40000.0, 40000.1)
+    assert strategy._micro_price_i_bucket == 9
+
+    # 1-tick spread -> s_bucket=0.
+    quote(500, 500, 40000.0, 40000.1)
+    assert strategy._micro_price_s_bucket == 0
+
+    # 2-tick spread -> s_bucket=1.
+    quote(500, 500, 40000.0, 40000.2)
+    assert strategy._micro_price_s_bucket == 1
+
+
+def test_mid_price_sample_includes_micro_price(env):
+    # Arrange — bid_qty=ask_qty=100_000 (TestDataStubs.quote_tick defaults) ->
+    # I=0.5 -> I_bucket=5; 1-tick spread -> s_bucket=0.
+    strategy = _make_strategy(env, sample_mid=True)
+    strategy.start()
+    table = _make_table_i_by_s()
+    table[5][0] = 0.02
+    strategy._lookup_table = {"table_I_by_S": table}
+
+    # Act
+    _process_quote(env, 40000.0, 40000.1)
+    _fire_mid_timer(env, strategy)
+
+    # Assert
+    sample = strategy._mid_samples[-1]
+    assert strategy._micro_price is not None
+    assert sample.micro_price == str(strategy._micro_price)
+    assert sample.micro_price_i_bucket == 5
+    assert sample.micro_price_s_bucket == 0
