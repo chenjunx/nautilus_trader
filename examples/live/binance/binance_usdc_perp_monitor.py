@@ -16,7 +16,7 @@
 """
 Run a data-only monitor for multiple Binance USDT-M perpetual futures.
 
-Monitored symbols: KAITOUSDC, SOLUSDC, ETHUSDC, NEARUSDC.
+Monitored symbols: KAITOUSDC, SOLUSDC, ETHUSDC, NEARUSDC, BTCUSDC.
 No execution client — cannot submit orders.
 
 """
@@ -39,12 +39,13 @@ from nautilus_trader.model.identifiers import TraderId
 
 # Per-symbol GLFT parameters fitted from ~4.8 h of live LOB + trade data (2026-06-28).
 # quote_arrival_a (A) and quote_intensity_k (k) follow λ(δ) = A·exp(−k·δ).
-# KAITOUSDC has no fitted data yet; defaults (A=1, k=1831) are placeholders.
+# KAITOUSDC and BTCUSDC have no fitted data yet; defaults (A=1, k=1831) are placeholders.
 GLFT_PARAMS: dict[str, dict] = {
     "KAITOUSDC-PERP": {"quote_arrival_a": 1.0,     "quote_intensity_k": 1831.0},
     "SOLUSDC-PERP":   {"quote_arrival_a": 34.33,   "quote_intensity_k": 111.70},
     "ETHUSDC-PERP":   {"quote_arrival_a": 43.59,   "quote_intensity_k": 15.81},
     "NEARUSDC-PERP":  {"quote_arrival_a": 15.31,   "quote_intensity_k": 480.51},
+    "BTCUSDC-PERP":   {"quote_arrival_a": 1.0,     "quote_intensity_k": 1831.0},
 }
 
 SYMBOLS = list(GLFT_PARAMS)
