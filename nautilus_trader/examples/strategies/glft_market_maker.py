@@ -233,6 +233,19 @@ class QueueFillSample(Data):
     rho: str
 
 
+@customdataclass
+class OrderBookSnapshot(Data):
+    """
+    A catalog-persistable full order book checkpoint, taken periodically so
+    offline reconstruction of book state at a given time doesn't require
+    replaying every delta since strategy start.
+    """
+
+    instrument_id: InstrumentId
+    bids: dict
+    asks: dict
+
+
 class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     """
     Configuration for ``GLFTMarketMaker`` instances.
@@ -379,20 +392,29 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
         consecutive fit windows.
     persist_market_data : bool, default True
         If received trade ticks and order book deltas should be persisted.
+    book_snapshot_interval_secs : PositiveFloat, default 3600.0
+        Interval in seconds between full order book checkpoints written to
+        the catalog as ``OrderBookSnapshot`` records (depth capped at
+        ``book_depth``). Only takes effect when both ``persist_market_data``
+        and ``subscribe_book_deltas`` are ``True``, since it snapshots the
+        locally-maintained book built from the delta stream. Lets offline
+        reconstruction of book state at time T replay deltas from the
+        nearest prior snapshot instead of from strategy start.
     catalog_path : str, default "data/kaitousdc/catalog"
         The local parquet data catalog path for persisted market data.
     flush_interval_secs : PositiveFloat, default 5.0
         The maximum interval in seconds between market data flushes.
     max_buffer_size : PositiveInt, default 10000
         The maximum buffered trade and book delta count before flushing.
-    persist_params : bool, default True
+    persist_params : bool, default False
         If per-tick GLFT parameter snapshots (k, A, gamma, sigma, mid,
         position, reservation price, quoted bid/ask) should be persisted to
         the catalog as ``GLFTParamsSnapshot`` records, for offline
-        time-series reconstruction of a run. Independent of
-        ``persist_market_data``. Writes to disk happen asynchronously on a
-        dedicated background thread so they never block the strategy's main
-        event handling.
+        time-series reconstruction of a run. Also gates ``QueueFillSample``
+        persistence (queue-position calibration records) — the two share
+        this flag. Independent of ``persist_market_data``. Writes to disk
+        happen asynchronously on a dedicated background thread so they never
+        block the strategy's main event handling.
     params_flush_interval_secs : PositiveFloat, default 5.0
         The maximum interval in seconds between parameter snapshot flushes.
     params_max_buffer_size : PositiveInt, default 100
@@ -475,10 +497,11 @@ class GLFTMarketMakerConfig(StrategyConfig, frozen=True):
     rls_redis_url: str | None = None
     rls_max_jump_ratio: PositiveFloat = 5.0
     persist_market_data: bool = True
+    book_snapshot_interval_secs: PositiveFloat = 3600.0
     catalog_path: str = "data/catalog"
     flush_interval_secs: PositiveFloat = 5.0
     max_buffer_size: PositiveInt = 10_000
-    persist_params: bool = True
+    persist_params: bool = False
     params_flush_interval_secs: PositiveFloat = 5.0
     params_max_buffer_size: PositiveInt = 100
     enable_lookup_table: bool = False
@@ -513,6 +536,7 @@ class GLFTMarketMaker(Strategy):
     MID_SAMPLE_TIMER_NAME = "mid_price_sample"
     QUEUE_SETTLE_TIMER_NAME = "queue_position_settle"
     LOOKUP_TABLE_TIMER_NAME = "lookup_table_recompute"
+    BOOK_SNAPSHOT_TIMER_NAME = "book_snapshot"
 
     def __init__(self, config: GLFTMarketMakerConfig) -> None:
         super().__init__(config)
@@ -523,6 +547,7 @@ class GLFTMarketMaker(Strategy):
         self._bar_count = 0
         self._book_count = 0
         self._book_delta_count = 0
+        self._book_snapshot_count = 0
         self._last_quote: QuoteTick | None = None
         self._book: OrderBook | None = None
         self._last_book_ts_event: int | None = None
@@ -622,7 +647,7 @@ class GLFTMarketMaker(Strategy):
             self._catalog = ParquetDataCatalog(self.config.catalog_path)
             self._catalog.write_data([self.instrument])
 
-        if self.config.persist_params:
+        if self.config.persist_params or self.config.persist_market_data:
             self._params_executor = ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix="params-flush",
@@ -652,6 +677,12 @@ class GLFTMarketMaker(Strategy):
                 book_type=BookType.L2_MBP,
                 depth=self.config.book_depth,
             )
+        if self.config.subscribe_book_deltas and self.config.persist_market_data:
+            self.clock.set_timer(
+                name=self.BOOK_SNAPSHOT_TIMER_NAME,
+                interval=pd.Timedelta(seconds=self.config.book_snapshot_interval_secs),
+                callback=self.on_timer,
+            )
         if self.config.sample_mid:
             self.clock.set_timer(
                 name=self.MID_SAMPLE_TIMER_NAME,
@@ -676,6 +707,7 @@ class GLFTMarketMaker(Strategy):
             f"book_snapshots={self.config.subscribe_book_snapshots} | "
             f"book_deltas={self.config.subscribe_book_deltas} | "
             f"book_depth={self.config.book_depth} | "
+            f"book_snapshot_interval_secs={self.config.book_snapshot_interval_secs} | "
             f"sample_mid={self.config.sample_mid} | "
             f"mid_sample_interval_secs={self.config.mid_sample_interval_secs} | "
             f"calculate_ewma_variance={self.config.calculate_ewma_variance} | "
@@ -884,6 +916,10 @@ class GLFTMarketMaker(Strategy):
 
         if event.name == self.LOOKUP_TABLE_TIMER_NAME:
             self._lookup_table_recompute()
+            return
+
+        if event.name == self.BOOK_SNAPSHOT_TIMER_NAME:
+            self._capture_book_snapshot()
             return
 
         if event.name != self.MID_SAMPLE_TIMER_NAME:
@@ -2160,6 +2196,64 @@ class GLFTMarketMaker(Strategy):
         self._catalog.write_data(buf, skip_disjoint_check=True)
         self.log.info(f"Flushed {len(buf)} queue fill samples")
 
+    def _capture_book_snapshot(self) -> None:
+        """
+        Build a full ``OrderBookSnapshot`` from the locally-maintained book
+        and hand it off for async persistence.
+
+        ``ts_event`` is set to the ``ts_event`` of the most recently applied
+        delta, so offline readers know which deltas (by ``ts_event >``) still
+        need replaying on top of this checkpoint.
+        """
+        if self._book is None:
+            return
+
+        depth = self.config.book_depth
+        bids = [[str(level.price), level.size()] for level in self._book.bids()[:depth]]
+        asks = [[str(level.price), level.size()] for level in self._book.asks()[:depth]]
+
+        snapshot = OrderBookSnapshot(
+            instrument_id=self.config.instrument_id,
+            bids={"levels": bids},
+            asks={"levels": asks},
+            ts_event=self._last_book_ts_event or self.clock.timestamp_ns(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self._book_snapshot_count += 1
+        self._persist_book_snapshot(snapshot)
+
+    def _persist_book_snapshot(self, snapshot: OrderBookSnapshot) -> None:
+        """
+        Write a single full order book snapshot to the catalog on the
+        background executor.
+
+        Snapshots are infrequent (hourly by default), so — like
+        ``QueueFillSample`` — no size/time buffering is needed; each one is
+        submitted for an async write as soon as it's captured.
+        """
+        if self._catalog is None:
+            return
+
+        if self._params_executor is not None:
+            self._params_executor.submit(self._flush_book_snapshot_worker, [snapshot])
+        else:
+            # Fallback: run inline when executor was shut down (e.g. during tests).
+            self._flush_book_snapshot_worker([snapshot])
+
+    def _flush_book_snapshot_worker(self, buf: list[OrderBookSnapshot]) -> None:
+        """
+        Background worker: write buffered order book snapshots to the catalog.
+
+        ``OrderBookSnapshot`` is its own Parquet dataset type (catalog
+        partitions by type), so this cannot race with the param-snapshot,
+        queue-fill, or market-data writers.
+        """
+        if self._catalog is None:
+            return
+
+        self._catalog.write_data(buf, skip_disjoint_check=True)
+        self.log.info(f"Flushed {len(buf)} order book snapshot(s)")
+
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
         Actions to be performed when a trade tick is received.
@@ -2269,6 +2363,7 @@ class GLFTMarketMaker(Strategy):
             + self._bar_count
             + self._book_count
             + self._book_delta_count
+            + self._book_snapshot_count
             + self._mid_sample_count
             + self._ewma_delta_s_count
         )
@@ -2280,6 +2375,7 @@ class GLFTMarketMaker(Strategy):
             f"bars={self._bar_count} | "
             f"book_snapshots={self._book_count} | "
             f"book_deltas={self._book_delta_count} | "
+            f"book_checkpoints={self._book_snapshot_count} | "
             f"pending_trades={len(self._trade_buffer)} | "
             f"pending_book_deltas={len(self._book_delta_buffer)} | "
             f"mid_samples={self._mid_sample_count} | "
