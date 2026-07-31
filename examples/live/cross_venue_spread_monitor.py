@@ -176,18 +176,19 @@ class SpreadMonitor(Strategy):
                 "secondary_spot": secondary_spot[base],
             }
 
-        if self._alert_only:
-            print(f"[SpreadMonitor] alert-only | 品种数={len(qualifying)} | "
-                  f"滑点={self._slippage*100:.4f}% | 黑名单={BLACKLIST}")
-        else:
-            print(f"\n{'='*72}")
-            print(f"[SpreadMonitor] 符合条件的 USDT 现货对: {len(qualifying)} 个")
-            print(f"  规则: 主所有现货+永续 且 副所有现货 且不在黑名单")
-            print(f"  主所: {MAIN_SPOT_VENUES}  副所: {SECONDARY_VENUES}")
+        # 打印配对详情
+        print(f"\n{'='*72}")
+        print(f"[SpreadMonitor] 配对完成，共 {len(qualifying)} 个 USDT 交易对")
+        print(f"  主所: {MAIN_SPOT_VENUES}  副所: {SECONDARY_VENUES}")
+        if not self._alert_only:
             print(f"  净价差阈值: {self._min_net_pct}%  滑点: {self._slippage*100:.4f}%")
-            for v, f in self._venue_defaults.items():
-                print(f"  {v} 手续费: {f*100:.4f}%")
-            print(f"{'='*72}\n")
+        print()
+        for base in sorted(qualifying):
+            info = qualifying[base]
+            main_vs = sorted(info["main_spot"].keys())
+            sec_vs = sorted(info["secondary_spot"].keys())
+            print(f"  {base+'/USDT':<16} 主所: {', '.join(main_vs):<30} 副所: {', '.join(sec_vs)}")
+        print(f"{'='*72}\n")
 
         # 订阅现货行情
         for base, info in sorted(qualifying.items()):
