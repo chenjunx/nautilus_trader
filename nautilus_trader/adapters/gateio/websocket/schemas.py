@@ -18,7 +18,7 @@ from typing import Any
 import msgspec
 
 
-class GateIoBookTickerResult(msgspec.Struct):
+class GateIoBookTickerResult(msgspec.Struct, omit_defaults=True):
     """
     Gate.io spot.book_ticker update result.
 
@@ -53,13 +53,14 @@ class GateIoBookTickerResult(msgspec.Struct):
 class GateIoWsMessage(msgspec.Struct, omit_defaults=True):
     """Top-level Gate.io WebSocket frame.
 
-    result is kept as Raw so that subscribe-ack frames (where result is
-    {"status":"success"}) do not fail decoding — the ticker payload is
-    decoded separately only when event == "update".
+    result is typed as Any so that both subscribe-ack {"status":"success"}
+    and ticker update objects decode without error. The ticker payload is
+    converted to GateIoBookTickerResult via msgspec.convert() only when
+    event == "update".
     """
 
     time: int
     channel: str
     event: str
-    result: msgspec.Raw | None = None
-    error: dict[str, Any] | None = None
+    result: Any = None
+    error: Any = None

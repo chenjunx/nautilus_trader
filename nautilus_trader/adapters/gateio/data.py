@@ -91,7 +91,6 @@ class GateIoDataClient(LiveMarketDataClient):
         )
 
         self._decoder = msgspec.json.Decoder(GateIoWsMessage)
-        self._decoder_ticker = msgspec.json.Decoder(GateIoBookTickerResult)
         self._subscribed_symbols: set[str] = set()
 
     def _send_all_instruments_to_data_engine(self) -> None:
@@ -143,9 +142,9 @@ class GateIoDataClient(LiveMarketDataClient):
             return
 
         try:
-            result = self._decoder_ticker.decode(msg.result)
+            result = msgspec.convert(msg.result, GateIoBookTickerResult)
         except Exception as e:
-            self._log.warning(f"Failed to decode ticker result: {e!r}")
+            self._log.warning(f"Failed to convert ticker result: {e!r}")
             return
 
         instrument_id = InstrumentId.from_str(f"{result.s}.GATEIO")
