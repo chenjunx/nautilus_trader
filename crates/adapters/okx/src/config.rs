@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     credential::credential_env_vars,
-    enums::{OKXContractType, OKXEnvironment, OKXInstrumentType, OKXMarginMode, OKXVipLevel},
+    enums::{
+        OKXContractType, OKXEnvironment, OKXInstrumentType, OKXMarginMode, OKXRegion, OKXVipLevel,
+    },
     urls::{
         get_http_base_url, get_ws_base_url_business, get_ws_base_url_private,
         get_ws_base_url_public,
@@ -37,7 +39,7 @@ use crate::common::{
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.okx")
 )]
 pub struct OKXDataClientConfig {
     /// Optional API key for authenticated endpoints.
@@ -51,6 +53,9 @@ pub struct OKXDataClientConfig {
     pub instrument_types: Vec<OKXInstrumentType>,
     /// Contract type filter applied to loaded instruments.
     pub contract_types: Option<Vec<OKXContractType>>,
+    /// Whether to load spread trading instruments from the separate spread endpoint.
+    #[builder(default)]
+    pub load_spreads: bool,
     /// Instrument families to load (e.g., "BTC-USD", "ETH-USD").
     /// Required for OPTIONS. Optional for FUTURES/SWAP. Not applicable for SPOT/MARGIN.
     pub instrument_families: Option<Vec<String>>,
@@ -65,6 +70,9 @@ pub struct OKXDataClientConfig {
     /// The API environment (live or demo).
     #[builder(default)]
     pub environment: OKXEnvironment,
+    /// The API region (global, EEA, or US).
+    #[builder(default)]
+    pub region: OKXRegion,
     /// HTTP timeout in seconds.
     #[builder(default = 60)]
     pub http_timeout_secs: u64,
@@ -110,28 +118,28 @@ impl OKXDataClientConfig {
         has_key && has_secret && has_passphrase
     }
 
-    /// Returns the HTTP base URL, falling back to the default when unset.
+    /// Returns the HTTP base URL, falling back to the region default when unset.
     #[must_use]
     pub fn http_base_url(&self) -> String {
         self.base_url_http
             .clone()
-            .unwrap_or_else(|| get_http_base_url().to_string())
+            .unwrap_or_else(|| get_http_base_url(self.region).to_string())
     }
 
-    /// Returns the public WebSocket URL, respecting the environment and overrides.
+    /// Returns the public WebSocket URL, respecting the region, environment, and overrides.
     #[must_use]
     pub fn ws_public_url(&self) -> String {
         self.base_url_ws_public
             .clone()
-            .unwrap_or_else(|| get_ws_base_url_public(self.environment).to_string())
+            .unwrap_or_else(|| get_ws_base_url_public(self.region, self.environment).to_string())
     }
 
-    /// Returns the business WebSocket URL, respecting the environment and overrides.
+    /// Returns the business WebSocket URL, respecting the region, environment, and overrides.
     #[must_use]
     pub fn ws_business_url(&self) -> String {
         self.base_url_ws_business
             .clone()
-            .unwrap_or_else(|| get_ws_base_url_business(self.environment).to_string())
+            .unwrap_or_else(|| get_ws_base_url_business(self.region, self.environment).to_string())
     }
 
     /// Returns `true` when the business WebSocket should be instantiated.
@@ -153,7 +161,7 @@ impl OKXDataClientConfig {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.okx")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.okx")
 )]
 pub struct OKXExecClientConfig {
     /// The trader ID for the client.
@@ -187,12 +195,18 @@ pub struct OKXExecClientConfig {
     /// The API environment (live or demo).
     #[builder(default)]
     pub environment: OKXEnvironment,
+    /// The API region (global, EEA, or US).
+    #[builder(default)]
+    pub region: OKXRegion,
     /// HTTP timeout in seconds.
     #[builder(default = 60)]
     pub http_timeout_secs: u64,
     /// Enables consumption of the fills WebSocket channel when true.
     #[builder(default)]
     pub use_fills_channel: bool,
+    /// Whether to subscribe to spread order updates from the separate spread channel.
+    #[builder(default)]
+    pub load_spreads: bool,
     /// Enables mass-cancel support when true.
     #[builder(default)]
     pub use_mm_mass_cancel: bool,
@@ -238,28 +252,28 @@ impl OKXExecClientConfig {
         has_key && has_secret && has_passphrase
     }
 
-    /// Returns the HTTP base URL, falling back to the default when unset.
+    /// Returns the HTTP base URL, falling back to the region default when unset.
     #[must_use]
     pub fn http_base_url(&self) -> String {
         self.base_url_http
             .clone()
-            .unwrap_or_else(|| get_http_base_url().to_string())
+            .unwrap_or_else(|| get_http_base_url(self.region).to_string())
     }
 
-    /// Returns the private WebSocket URL, respecting the environment and overrides.
+    /// Returns the private WebSocket URL, respecting the region, environment, and overrides.
     #[must_use]
     pub fn ws_private_url(&self) -> String {
         self.base_url_ws_private
             .clone()
-            .unwrap_or_else(|| get_ws_base_url_private(self.environment).to_string())
+            .unwrap_or_else(|| get_ws_base_url_private(self.region, self.environment).to_string())
     }
 
-    /// Returns the business WebSocket URL, respecting the environment and overrides.
+    /// Returns the business WebSocket URL, respecting the region, environment, and overrides.
     #[must_use]
     pub fn ws_business_url(&self) -> String {
         self.base_url_ws_business
             .clone()
-            .unwrap_or_else(|| get_ws_base_url_business(self.environment).to_string())
+            .unwrap_or_else(|| get_ws_base_url_business(self.region, self.environment).to_string())
     }
 }
 
@@ -286,6 +300,19 @@ http_timeout_secs = 90
             vec![OKXInstrumentType::Spot, OKXInstrumentType::Swap]
         );
         assert_eq!(config.http_timeout_secs, 90);
+        assert!(!config.load_spreads);
+    }
+
+    #[rstest]
+    fn test_data_config_toml_load_spreads() {
+        let config: OKXDataClientConfig = toml::from_str(
+            "
+load_spreads = true
+",
+        )
+        .unwrap();
+
+        assert!(config.load_spreads);
     }
 
     #[rstest]
@@ -299,7 +326,85 @@ http_timeout_secs = 90
         assert_eq!(config.instrument_types, expected.instrument_types);
         assert_eq!(config.http_timeout_secs, expected.http_timeout_secs);
         assert_eq!(config.use_fills_channel, expected.use_fills_channel);
+        assert_eq!(config.load_spreads, expected.load_spreads);
         assert_eq!(config.use_mm_mass_cancel, expected.use_mm_mass_cancel);
         assert_eq!(config.transport_backend, expected.transport_backend);
+    }
+
+    #[rstest]
+    fn test_exec_config_toml_load_spreads() {
+        let config: OKXExecClientConfig = toml::from_str(
+            "
+load_spreads = true
+",
+        )
+        .unwrap();
+
+        assert!(config.load_spreads);
+    }
+
+    #[rstest]
+    fn test_data_config_default_region_is_global() {
+        let config = OKXDataClientConfig::default();
+
+        assert_eq!(config.region, OKXRegion::Global);
+        assert_eq!(config.http_base_url(), "https://www.okx.com");
+        assert_eq!(config.ws_public_url(), "wss://ws.okx.com:8443/ws/v5/public");
+    }
+
+    #[rstest]
+    fn test_data_config_eea_region_urls() {
+        let config = OKXDataClientConfig::builder()
+            .region(OKXRegion::Eea)
+            .build();
+
+        assert_eq!(config.http_base_url(), "https://eea.okx.com");
+        assert_eq!(
+            config.ws_public_url(),
+            "wss://wseea.okx.com:8443/ws/v5/public"
+        );
+        assert_eq!(
+            config.ws_business_url(),
+            "wss://wseea.okx.com:8443/ws/v5/business"
+        );
+    }
+
+    #[rstest]
+    fn test_exec_config_eea_region_urls() {
+        let config = OKXExecClientConfig::builder()
+            .region(OKXRegion::Eea)
+            .build();
+
+        assert_eq!(config.http_base_url(), "https://eea.okx.com");
+        assert_eq!(
+            config.ws_private_url(),
+            "wss://wseea.okx.com:8443/ws/v5/private"
+        );
+        assert_eq!(
+            config.ws_business_url(),
+            "wss://wseea.okx.com:8443/ws/v5/business"
+        );
+    }
+
+    #[rstest]
+    fn test_config_region_override_takes_precedence() {
+        let config = OKXDataClientConfig::builder()
+            .region(OKXRegion::Eea)
+            .base_url_http("https://custom.proxy".to_string())
+            .build();
+
+        assert_eq!(config.http_base_url(), "https://custom.proxy");
+    }
+
+    #[rstest]
+    fn test_data_config_toml_region() {
+        let config: OKXDataClientConfig = toml::from_str(
+            r#"
+region = "eea"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.region, OKXRegion::Eea);
     }
 }

@@ -109,15 +109,6 @@ impl AsyncTimeEventSender {
     pub const fn new(time_tx: tokio::sync::mpsc::UnboundedSender<TimeEventHandler>) -> Self {
         Self { time_tx }
     }
-
-    /// Gets a clone of the underlying channel sender for async use.
-    ///
-    /// This allows async contexts to get a direct channel sender that
-    /// can be moved into async tasks without `RefCell` borrowing issues.
-    #[must_use]
-    pub fn get_channel_sender(&self) -> tokio::sync::mpsc::UnboundedSender<TimeEventHandler> {
-        self.time_tx.clone()
-    }
 }
 
 impl TimeEventSender for AsyncTimeEventSender {
@@ -177,7 +168,7 @@ pub struct AsyncRunner {
     data_evt_tx: tokio::sync::mpsc::UnboundedSender<DataEvent>,
 }
 
-/// Handle for stopping the AsyncRunner from another context.
+/// Handle for stopping the `AsyncRunner` from another context.
 #[derive(Clone, Debug)]
 pub struct AsyncRunnerHandle {
     signal_tx: tokio::sync::mpsc::UnboundedSender<()>,
@@ -367,13 +358,13 @@ impl AsyncRunner {
         handler.run();
     }
 
-    /// Handles a data command by sending to the DataEngine.
+    /// Handles a data command by sending to the `DataEngine`.
     #[inline]
     pub fn handle_data_command(cmd: DataCommand) {
         msgbus::send_data_command(MessagingSwitchboard::data_engine_execute(), cmd);
     }
 
-    /// Handles a data event by sending to the appropriate DataEngine endpoint.
+    /// Handles a data event by sending to the appropriate `DataEngine` endpoint.
     #[inline]
     pub fn handle_data_event(event: DataEvent) {
         match event {
@@ -402,7 +393,7 @@ impl AsyncRunner {
         }
     }
 
-    /// Handles an execution command by sending to the ExecEngine.
+    /// Handles an execution command by sending to the `ExecEngine`.
     #[inline]
     pub fn handle_exec_command(cmd: TradingCommand) {
         msgbus::send_trading_command(MessagingSwitchboard::exec_engine_execute(), cmd);
@@ -483,8 +474,9 @@ mod tests {
             TimeInForce,
         },
         events::{
-            OrderAccepted, OrderAcceptedBatch, OrderCanceled, OrderCanceledBatch, OrderEvent,
-            OrderEventAny, OrderSubmitted, OrderSubmittedBatch, account::state::AccountState,
+            OrderAcceptedBatch, OrderCanceledBatch, OrderEvent, OrderEventAny, OrderSubmittedBatch,
+            account::state::AccountState,
+            order::spec::{OrderAcceptedSpec, OrderCanceledSpec, OrderSubmittedSpec},
         },
         identifiers::{
             AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, StrategyId, TradeId,
@@ -511,7 +503,7 @@ mod tests {
         }
     }
 
-    // Test helper to create AsyncRunner with manual channels.
+    // Test fixture to create AsyncRunner with manual channels.
     // Sender halves are dummies (not connected to the test receivers) since
     // these tests exercise the event loop, not TLS binding.
     fn create_test_runner(
@@ -559,25 +551,6 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = AsyncTimeEventSender::new(tx);
         assert!(format!("{sender:?}").contains("AsyncTimeEventSender"));
-    }
-
-    #[rstest]
-    fn test_async_time_event_sender_get_channel() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let sender = AsyncTimeEventSender::new(tx);
-        let channel = sender.get_channel_sender();
-
-        // Verify the channel is functional
-        let event = TimeEvent::new(
-            Ustr::from("test"),
-            UUID4::new(),
-            UnixNanos::from(1),
-            UnixNanos::from(2),
-        );
-        let callback = TimeEventCallback::from(|_: TimeEvent| {});
-        let handler = TimeEventHandler::new(event, callback);
-
-        assert!(channel.send(handler).is_ok());
     }
 
     #[tokio::test]
@@ -797,6 +770,7 @@ mod tests {
             UUID4::new(),
             UnixNanos::default(),
             None,
+            None, // correlation_id
         ));
 
         sender.execute(command);
@@ -842,6 +816,7 @@ mod tests {
             UUID4::new(),
             UnixNanos::default(),
             None,
+            None, // correlation_id
         ));
         exec_cmd_tx.send(command).unwrap();
 
@@ -887,6 +862,7 @@ mod tests {
                 UUID4::new(),
                 UnixNanos::default(),
                 None,
+                None, // correlation_id
             ));
             exec_cmd_tx.send(command).unwrap();
         }
@@ -905,16 +881,9 @@ mod tests {
     async fn test_execution_event_order_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExecutionEvent>();
 
-        let event = OrderSubmitted::new(
-            TraderId::from("TRADER-001"),
-            StrategyId::from("S-001"),
-            InstrumentId::from("EUR/USD.SIM"),
-            ClientOrderId::from("O-001"),
-            AccountId::from("SIM-001"),
-            UUID4::new(),
-            UnixNanos::from(1),
-            UnixNanos::from(2),
-        );
+        let event = OrderSubmittedSpec::builder()
+            .client_order_id(ClientOrderId::from("O-001"))
+            .build();
 
         tx.send(ExecutionEvent::Order(OrderEventAny::Submitted(event)))
             .unwrap();
@@ -1140,16 +1109,9 @@ mod tests {
         time_evt_tx.send(handler).unwrap();
 
         // Send execution order event
-        let order_event = OrderSubmitted::new(
-            TraderId::from("TRADER-001"),
-            StrategyId::from("S-001"),
-            InstrumentId::from("EUR/USD.SIM"),
-            ClientOrderId::from("O-001"),
-            AccountId::from("SIM-001"),
-            UUID4::new(),
-            UnixNanos::from(1),
-            UnixNanos::from(2),
-        );
+        let order_event = OrderSubmittedSpec::builder()
+            .client_order_id(ClientOrderId::from("O-001"))
+            .build();
         exec_evt_tx
             .send(ExecutionEvent::Order(OrderEventAny::Submitted(order_event)))
             .unwrap();
@@ -1267,14 +1229,14 @@ mod tests {
         // Get handle before moving runner
         let handle = runner.handle();
 
-        let runner_task = tokio::spawn(async move {
+        let runner_handle = tokio::spawn(async move {
             runner.run().await;
         });
 
         // Use handle to stop
         handle.stop();
 
-        let result = tokio::time::timeout(Duration::from_millis(100), runner_task).await;
+        let result = tokio::time::timeout(Duration::from_millis(100), runner_handle).await;
         assert!(result.is_ok(), "Runner should stop via handle");
     }
 
@@ -1319,7 +1281,7 @@ mod tests {
                 .unwrap();
         }
 
-        let runner_task = tokio::spawn(async move {
+        let runner_handle = tokio::spawn(async move {
             runner.run().await;
         });
 
@@ -1327,7 +1289,7 @@ mod tests {
         tokio::task::yield_now().await;
         handle.stop();
 
-        let result = tokio::time::timeout(Duration::from_millis(200), runner_task).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), runner_handle).await;
         assert!(result.is_ok(), "Runner should process events and stop");
     }
 
@@ -1371,6 +1333,7 @@ mod tests {
                     UUID4::new(),
                     UnixNanos::default(),
                     None,
+                    None, // correlation_id
                 ),
             ));
             assert!(runner.channels.exec_cmd_rx.try_recv().is_ok());
@@ -1443,26 +1406,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExecutionEvent>();
 
         let events = vec![
-            OrderSubmitted::new(
-                TraderId::from("TRADER-001"),
-                StrategyId::from("S-001"),
-                InstrumentId::from("EUR/USD.SIM"),
-                ClientOrderId::from("O-001"),
-                AccountId::from("SIM-001"),
-                UUID4::new(),
-                UnixNanos::from(1),
-                UnixNanos::from(2),
-            ),
-            OrderSubmitted::new(
-                TraderId::from("TRADER-001"),
-                StrategyId::from("S-001"),
-                InstrumentId::from("EUR/USD.SIM"),
-                ClientOrderId::from("O-002"),
-                AccountId::from("SIM-001"),
-                UUID4::new(),
-                UnixNanos::from(3),
-                UnixNanos::from(4),
-            ),
+            OrderSubmittedSpec::builder()
+                .client_order_id(ClientOrderId::from("O-001"))
+                .build(),
+            OrderSubmittedSpec::builder()
+                .client_order_id(ClientOrderId::from("O-002"))
+                .build(),
         ];
 
         let batch = OrderSubmittedBatch::new(events);
@@ -1484,30 +1433,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExecutionEvent>();
 
         let events = vec![
-            OrderAccepted::new(
-                TraderId::from("TRADER-001"),
-                StrategyId::from("S-001"),
-                InstrumentId::from("EUR/USD.SIM"),
-                ClientOrderId::from("O-001"),
-                VenueOrderId::from("V-001"),
-                AccountId::from("SIM-001"),
-                UUID4::new(),
-                UnixNanos::from(1),
-                UnixNanos::from(2),
-                false,
-            ),
-            OrderAccepted::new(
-                TraderId::from("TRADER-001"),
-                StrategyId::from("S-001"),
-                InstrumentId::from("EUR/USD.SIM"),
-                ClientOrderId::from("O-002"),
-                VenueOrderId::from("V-002"),
-                AccountId::from("SIM-001"),
-                UUID4::new(),
-                UnixNanos::from(3),
-                UnixNanos::from(4),
-                false,
-            ),
+            OrderAcceptedSpec::builder()
+                .client_order_id(ClientOrderId::from("O-001"))
+                .build(),
+            OrderAcceptedSpec::builder()
+                .client_order_id(ClientOrderId::from("O-002"))
+                .build(),
         ];
 
         let batch = OrderAcceptedBatch::new(events);
@@ -1529,30 +1460,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExecutionEvent>();
 
         let events = vec![
-            OrderCanceled::new(
-                TraderId::from("TRADER-001"),
-                StrategyId::from("S-001"),
-                InstrumentId::from("EUR/USD.SIM"),
-                ClientOrderId::from("O-001"),
-                UUID4::new(),
-                UnixNanos::from(1),
-                UnixNanos::from(2),
-                false,
-                None,
-                Some(AccountId::from("SIM-001")),
-            ),
-            OrderCanceled::new(
-                TraderId::from("TRADER-001"),
-                StrategyId::from("S-001"),
-                InstrumentId::from("EUR/USD.SIM"),
-                ClientOrderId::from("O-002"),
-                UUID4::new(),
-                UnixNanos::from(3),
-                UnixNanos::from(4),
-                false,
-                None,
-                Some(AccountId::from("SIM-001")),
-            ),
+            OrderCanceledSpec::builder()
+                .client_order_id(ClientOrderId::from("O-001"))
+                .build(),
+            OrderCanceledSpec::builder()
+                .client_order_id(ClientOrderId::from("O-002"))
+                .build(),
         ];
 
         let batch = OrderCanceledBatch::new(events);

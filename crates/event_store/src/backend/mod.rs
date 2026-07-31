@@ -40,8 +40,6 @@ use crate::{
 /// rows.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum IndexKind {
-    /// `intent_id -> seq`. Looks up the first entry for an agent or strategy intent.
-    IntentId,
     /// `client_order_id -> seq`. Looks up the first entry that mentions a client order id.
     ClientOrderId,
     /// `venue_order_id -> seq`. Looks up the first entry that mentions a venue order id.
@@ -64,8 +62,8 @@ pub enum ScanDirection {
 /// subsequent occurrences for the same `(kind, key)` are no-ops, so [`EventStore::lookup`]
 /// always returns the earliest `seq` that mentioned the key.
 ///
-/// Keys are stringified at the encoder boundary: `intent_id` from headers stringifies the
-/// UUID, `client_order_id` and `venue_order_id` are already strings on the wire types.
+/// Keys are stringified at the encoder boundary: `client_order_id` and `venue_order_id` are
+/// already strings on the wire types.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IndexKey {
     /// The secondary index this key belongs to.
@@ -227,16 +225,17 @@ pub trait EventStore: Send {
 
     /// Returns the latest recorded snapshot anchor for the open run.
     ///
-    /// Returns `Ok(None)` when no snapshot anchor has been recorded yet.
+    /// Returns `Ok(None)` when no snapshot anchor has been recorded yet. The default
+    /// implementation also returns `Ok(None)`: a backend without anchor support
+    /// truthfully has no anchor to report, and consumers (the verifier, retention
+    /// planning) must be able to distinguish "no anchor" from a real read failure.
     ///
     /// # Errors
     ///
-    /// Returns [`EventStoreError::Backend`] when no run is open or when the backend
-    /// does not support snapshot anchors.
+    /// Returns [`EventStoreError::Backend`] when no run is open and
+    /// [`EventStoreError::Corrupted`] when a stored anchor fails to decode.
     fn latest_snapshot_anchor(&self) -> Result<Option<SnapshotAnchor>, EventStoreError> {
-        Err(EventStoreError::Backend(
-            "snapshot anchors are not supported by this backend".to_string(),
-        ))
+        Ok(None)
     }
 
     /// Seals the open run with the given final status and persists the manifest update.

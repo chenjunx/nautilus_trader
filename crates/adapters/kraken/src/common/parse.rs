@@ -253,6 +253,7 @@ pub fn parse_spot_instrument(
         maker_fee,
         taker_fee,
         None,
+        None,
         ts_event,
         ts_init,
     );
@@ -338,6 +339,7 @@ pub fn parse_tokenized_instrument(
         None,
         maker_fee,
         taker_fee,
+        None,
         None,
         ts_event,
         ts_init,
@@ -448,7 +450,8 @@ pub fn parse_futures_instrument(
         margin_maint,
         None, // maker_fee
         None, // taker_fee
-        None,
+        None, // tick_scheme
+        None, // info
         ts_event,
         ts_init,
     );
@@ -1419,6 +1422,24 @@ mod tests {
     }
 
     #[rstest]
+    fn test_parse_futures_instrument_without_fee_schedule_uid() {
+        let json = load_test_json("http_futures_instrument_no_fee_schedule.json");
+        let response: crate::http::models::FuturesInstrumentsResponse =
+            serde_json::from_str(&json).unwrap();
+
+        let fut_instrument = &response.instruments[0];
+        assert!(fut_instrument.fee_schedule_uid.is_none());
+
+        let instrument = parse_futures_instrument(fut_instrument, TS, TS).unwrap();
+        match instrument {
+            InstrumentAny::CryptoPerpetual(perp) => {
+                assert_eq!(perp.id.symbol.as_str(), "PF_ETHUSD");
+            }
+            _ => panic!("Expected CryptoPerpetual"),
+        }
+    }
+
+    #[rstest]
     fn test_parse_trade_tick_from_array() {
         let json = load_test_json("http_trades.json");
         let wrapper: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1441,6 +1462,7 @@ mod tests {
             8, // size_precision
             Price::from("0.1"),
             Quantity::from("0.00000001"),
+            None,
             None,
             None,
             None,
@@ -1500,6 +1522,7 @@ mod tests {
             8, // size_precision
             Price::from("0.1"),
             Quantity::from("0.00000001"),
+            None,
             None,
             None,
             None,
@@ -1655,6 +1678,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             TS,
             TS,
         ));
@@ -1684,6 +1708,7 @@ mod tests {
             0,
             Price::from("0.5"),
             Quantity::from("1"),
+            None,
             None,
             None,
             None,
@@ -1992,6 +2017,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             TS,
             TS,
         ));
@@ -2152,6 +2178,7 @@ mod tests {
             8,
             Price::from("0.01"),
             Quantity::from("0.00000001"),
+            None,
             None,
             None,
             None,

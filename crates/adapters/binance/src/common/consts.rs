@@ -109,7 +109,7 @@ pub const BINANCE_SPOT_SBE_WS_URL: &str = "wss://stream-sbe.binance.com/ws";
 
 /// Binance Spot SBE WebSocket API URL (live exchange).
 pub const BINANCE_SPOT_SBE_WS_API_URL: &str =
-    "wss://ws-api.binance.com:443/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=3";
+    "wss://ws-api.binance.com:443/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=4";
 
 /// Binance USD-M Futures WebSocket Trading API URL (live exchange).
 pub const BINANCE_FUTURES_USD_WS_API_URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
@@ -119,11 +119,11 @@ pub const BINANCE_FUTURES_USD_WS_API_TESTNET_URL: &str =
     "wss://testnet.binancefuture.com/ws-fapi/v1";
 
 /// Binance Spot SBE WebSocket API URL (testnet).
-pub const BINANCE_SPOT_SBE_WS_API_TESTNET_URL: &str = "wss://ws-api.testnet.binance.vision/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=3";
+pub const BINANCE_SPOT_SBE_WS_API_TESTNET_URL: &str = "wss://ws-api.testnet.binance.vision/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=4";
 
 /// Binance Spot SBE WebSocket API URL (demo).
 pub const BINANCE_SPOT_SBE_WS_API_DEMO_URL: &str =
-    "wss://demo-ws-api.binance.com/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=3";
+    "wss://demo-ws-api.binance.com/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=4";
 
 /// Binance Spot WebSocket base URL (testnet).
 pub const BINANCE_SPOT_TESTNET_WS_URL: &str = "wss://stream.testnet.binance.vision/ws";
@@ -304,6 +304,12 @@ pub const BINANCE_NEW_ORDER_REJECTED_CODE: i64 = -2010;
 /// Binance error code returned when an order is not found.
 pub const BINANCE_NO_SUCH_ORDER_CODE: i64 = -2013;
 
+/// Binance error code returned when order execution status is unknown.
+pub const BINANCE_UNEXPECTED_RESPONSE_CODE: i64 = -1006;
+
+/// Binance error code returned when order execution status is unknown.
+pub const BINANCE_STATUS_UNKNOWN_CODE: i64 = -1007;
+
 /// Binance USD-M Futures error code for `dualSidePosition` sync rejection between
 /// UM (USDM) and CM (Coin-M) accounts on Portfolio Margin.
 ///
@@ -330,6 +336,8 @@ mod tests {
         assert_eq!(BINANCE_GTX_ORDER_REJECT_CODE, -5022);
         assert_eq!(BINANCE_NEW_ORDER_REJECTED_CODE, -2010);
         assert_eq!(BINANCE_NO_SUCH_ORDER_CODE, -2013);
+        assert_eq!(BINANCE_UNEXPECTED_RESPONSE_CODE, -1006);
+        assert_eq!(BINANCE_STATUS_UNKNOWN_CODE, -1007);
         assert_eq!(BINANCE_FUTURES_DUAL_SIDE_SYNC_REJECT_CODE, -4531);
     }
 }

@@ -18,7 +18,7 @@
 //! Modeled after databento's own `MockGateway` + `Fixture` pattern
 //! in `databento-0.44.0/src/live/client.rs`.
 
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use databento::dbn::{MetadataBuilder, SType, encode::dbn::AsyncMetadataEncoder, record::HasRType};
 use tokio::{
@@ -26,12 +26,14 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-pub enum MockEvent {
+pub(crate) enum MockEvent {
     Authenticate,
     AuthenticateReject(String),
     ExpectSubscription,
     Start,
     SendRecord(Box<dyn AsRef<[u8]> + Send>),
+    #[allow(dead_code, reason = "used by the clients benchmark target")]
+    SendBytes(Arc<[u8]>),
     Disconnect,
     Exit,
 }
@@ -44,6 +46,7 @@ impl Debug for MockEvent {
             Self::ExpectSubscription => write!(f, "ExpectSubscription"),
             Self::Start => write!(f, "Start"),
             Self::SendRecord(_) => write!(f, "SendRecord"),
+            Self::SendBytes(_) => write!(f, "SendBytes"),
             Self::Disconnect => write!(f, "Disconnect"),
             Self::Exit => write!(f, "Exit"),
         }
@@ -122,6 +125,11 @@ impl MockGateway {
         self.stream().flush().await.unwrap();
     }
 
+    async fn send_bytes(&mut self, bytes: Arc<[u8]>) {
+        self.stream().write_all(&bytes).await.unwrap();
+        self.stream().flush().await.unwrap();
+    }
+
     async fn disconnect(&mut self) {
         if let Some(stream) = self.stream.as_mut() {
             stream.shutdown().await.unwrap();
@@ -144,14 +152,14 @@ impl MockGateway {
     }
 }
 
-pub struct MockLsgServer {
+pub(crate) struct MockLsgServer {
     tx: tokio::sync::mpsc::UnboundedSender<MockEvent>,
     port: u16,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl MockLsgServer {
-    pub async fn new(dataset: &str) -> Self {
+    pub(crate) async fn new(dataset: &str) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut gateway = MockGateway::new(dataset.to_string()).await;
         let port = gateway.port();
@@ -166,6 +174,7 @@ impl MockLsgServer {
                     Some(MockEvent::ExpectSubscription) => gateway.expect_subscription().await,
                     Some(MockEvent::Start) => gateway.start().await,
                     Some(MockEvent::SendRecord(record)) => gateway.send_record(record).await,
+                    Some(MockEvent::SendBytes(bytes)) => gateway.send_bytes(bytes).await,
                     Some(MockEvent::Disconnect) => gateway.disconnect().await,
                     Some(MockEvent::Exit) | None => break,
                 }
@@ -175,29 +184,29 @@ impl MockLsgServer {
         Self { tx, port, task }
     }
 
-    pub fn addr(&self) -> String {
+    pub(crate) fn addr(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
 
-    pub fn authenticate(&self) {
+    pub(crate) fn authenticate(&self) {
         self.tx.send(MockEvent::Authenticate).unwrap();
     }
 
-    pub fn authenticate_reject(&self, error: &str) {
+    pub(crate) fn authenticate_reject(&self, error: &str) {
         self.tx
             .send(MockEvent::AuthenticateReject(error.to_string()))
             .unwrap();
     }
 
-    pub fn expect_subscription(&self) {
+    pub(crate) fn expect_subscription(&self) {
         self.tx.send(MockEvent::ExpectSubscription).unwrap();
     }
 
-    pub fn start(&self) {
+    pub(crate) fn start(&self) {
         self.tx.send(MockEvent::Start).unwrap();
     }
 
-    pub fn send_record<R>(&self, record: R)
+    pub(crate) fn send_record<R>(&self, record: R)
     where
         R: HasRType + AsRef<[u8]> + Clone + Send + 'static,
     {
@@ -206,11 +215,16 @@ impl MockLsgServer {
             .unwrap();
     }
 
-    pub fn disconnect(&self) {
+    #[allow(dead_code, reason = "used by the clients benchmark target")]
+    pub(crate) fn send_bytes(&self, bytes: Arc<[u8]>) {
+        self.tx.send(MockEvent::SendBytes(bytes)).unwrap();
+    }
+
+    pub(crate) fn disconnect(&self) {
         self.tx.send(MockEvent::Disconnect).unwrap();
     }
 
-    pub async fn stop(self) {
+    pub(crate) async fn stop(self) {
         self.tx.send(MockEvent::Exit).unwrap();
         self.task.await.unwrap();
     }

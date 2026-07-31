@@ -29,6 +29,7 @@ use std::{
     time::Duration,
 };
 
+use ahash::{AHashMap, AHashSet};
 use axum::{
     Router,
     extract::{
@@ -40,18 +41,18 @@ use axum::{
 };
 use nautilus_common::{
     clients::DataClient,
-    live::runner::set_data_event_sender,
+    live::runner::{replace_data_event_sender, set_data_event_sender},
     messages::{
-        DataEvent,
+        DataEvent, DataResponse,
         data::{
-            SubscribeBars, SubscribeBookDeltas, SubscribeBookDepth10, SubscribeFundingRates,
-            SubscribeIndexPrices, SubscribeMarkPrices, SubscribeOptionGreeks, SubscribeQuotes,
-            SubscribeTrades,
+            InstrumentResponse, RequestInstrument, SubscribeBars, SubscribeBookDeltas,
+            SubscribeBookDepth10, SubscribeFundingRates, SubscribeIndexPrices, SubscribeMarkPrices,
+            SubscribeOptionGreeks, SubscribeQuotes, SubscribeTrades, UnsubscribeTrades,
         },
     },
     testing::wait_until_async,
 };
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_deribit::{
     common::{consts::DERIBIT_CLIENT_ID, enums::DeribitEnvironment},
     config::DeribitDataClientConfig,
@@ -59,13 +60,15 @@ use nautilus_deribit::{
     http::models::DeribitProductType,
 };
 use nautilus_model::{
-    data::{BarType, Data},
+    data::{BarType, Data, TradeTick},
     enums::BookType,
     identifiers::InstrumentId,
 };
 use nautilus_network::http::HttpClient;
 use rstest::rstest;
 use serde_json::{Value, json};
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn data_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data")
@@ -75,6 +78,110 @@ fn load_json(filename: &str) -> Value {
     let content = std::fs::read_to_string(data_path().join(filename))
         .unwrap_or_else(|_| panic!("failed to read {filename}"));
     serde_json::from_str(&content).expect("invalid json")
+}
+
+fn sorted_strings(values: &[&str]) -> Vec<String> {
+    let mut values = values
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    values.sort();
+    values
+}
+
+fn trade_symbol_from_channel(channel: &str) -> Option<&str> {
+    channel
+        .strip_prefix("trades.")
+        .and_then(|suffix| suffix.rsplit_once('.'))
+        .map(|(symbol, _)| symbol)
+}
+
+async fn subscription_event_trade_symbols(
+    state: &TestServerState,
+    is_subscribe: bool,
+) -> Vec<String> {
+    let mut symbols = state
+        .subscription_events
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, event_is_subscribe)| *event_is_subscribe == is_subscribe)
+        .filter_map(|(channel, _)| trade_symbol_from_channel(channel).map(str::to_string))
+        .collect::<Vec<_>>();
+    symbols.sort();
+    symbols
+}
+
+async fn collect_trade_ticks(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+    expected_count: usize,
+) -> Vec<TradeTick> {
+    let mut trades = Vec::new();
+
+    while trades.len() < expected_count {
+        let event = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
+            .await
+            .expect("timeout waiting for trade")
+            .expect("channel closed");
+
+        if let DataEvent::Data(Data::Trade(trade)) = event {
+            trades.push(trade);
+        }
+    }
+
+    trades
+}
+
+async fn drain_data_events(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DataEvent>,
+    timeout: Duration,
+) -> Vec<DataEvent> {
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        events.push(event);
+    }
+    events
+}
+
+fn instrument_response(events: &[DataEvent]) -> Option<&InstrumentResponse> {
+    events.iter().find_map(|event| match event {
+        DataEvent::Response(DataResponse::Instrument(response)) => Some(response.as_ref()),
+        _ => None,
+    })
+}
+
+fn trade_payload_for_channel(base_payload: &Value, channel: &str, has_combo_parent: bool) -> Value {
+    let symbol = trade_symbol_from_channel(channel)
+        .expect("trade channel must use trades.{instrument}.{interval} format");
+    let mut payload = base_payload.clone();
+    let mut trade = payload["params"]["data"][0].clone();
+
+    payload["params"]["channel"] = json!(channel);
+    trade["instrument_name"] = json!(symbol);
+
+    let trade_id = match symbol {
+        "BTC-COMBO-1" => "900001",
+        "BTC-PERPETUAL" => "900002",
+        "BTC-27DEC24" => "900003",
+        _ => "900099",
+    };
+    trade["trade_id"] = json!(trade_id);
+
+    let trade_obj = trade
+        .as_object_mut()
+        .expect("trade payload must be a JSON object");
+
+    if has_combo_parent && matches!(symbol, "BTC-PERPETUAL" | "BTC-27DEC24") {
+        trade_obj.insert("combo_id".to_string(), json!("BTC-COMBO-1"));
+        trade_obj.insert("combo_trade_id".to_string(), json!("900001"));
+    } else {
+        trade_obj.remove("combo_id");
+        trade_obj.remove("combo_trade_id");
+    }
+
+    payload["params"]["data"] = json!([trade]);
+    payload
 }
 
 #[derive(Clone, Default)]
@@ -87,6 +194,7 @@ struct TestServerState {
     // When true, public/get_instrument responds with a JSON-RPC error,
     // exercising the lazy-load HTTP-failure path.
     fail_get_instrument: Arc<AtomicBool>,
+    get_instrument_request_count: Arc<AtomicUsize>,
 }
 
 async fn handle_jsonrpc_request(
@@ -99,7 +207,12 @@ async fn handle_jsonrpc_request(
 
     match method {
         "public/get_instruments" => handle_get_instruments(id, params).await,
+        "public/get_combos" => handle_get_combos(id).await,
         "public/get_instrument" => {
+            state
+                .get_instrument_request_count
+                .fetch_add(1, Ordering::Relaxed);
+
             if state.fail_get_instrument.load(Ordering::Relaxed) {
                 return Json(json!({
                     "jsonrpc": "2.0",
@@ -121,6 +234,10 @@ async fn handle_jsonrpc_request(
 
             // Route by requested instrument so lazy-load tests get the matching
             // payload rather than always receiving the BTC-PERPETUAL fixture
+            if instrument_name == "BTC-COMBO-1" {
+                return handle_get_combo_instrument(id).await;
+            }
+
             let fixture =
                 if instrument_name.contains('-') && instrument_name.matches('-').count() >= 3 {
                     "http_get_instrument_option.json"
@@ -144,6 +261,69 @@ async fn handle_jsonrpc_request(
     }
 }
 
+async fn handle_get_combo_instrument(id: u64) -> Response {
+    Json(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "kind": "future_combo",
+            "instrument_name": "BTC-COMBO-1",
+            "max_leverage": 1,
+            "maker_commission": 0.0,
+            "taker_commission": 0.0,
+            "instrument_type": "reversed",
+            "creation_timestamp": 1719561600000_i64,
+            "is_active": true,
+            "tick_size": 0.01,
+            "contract_size": 1.0,
+            "instrument_id": 456789,
+            "min_trade_amount": 1.0,
+            "settlement_currency": "BTC",
+            "base_currency": "BTC",
+            "counter_currency": "USD",
+            "quote_currency": "USD",
+            "expiration_timestamp": 1767225600000_i64,
+            "tick_size_steps": []
+        },
+        "usIn": 1765308000000000_u64,
+        "usOut": 1765308000000500_u64,
+        "usDiff": 500,
+        "testnet": true
+    }))
+    .into_response()
+}
+
+async fn handle_get_combos(id: u64) -> Response {
+    Json(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": [
+            {
+                "id": "BTC-COMBO-1",
+                "state": "active",
+                "legs": [
+                    {
+                        "amount": -1,
+                        "instrument_name": "BTC-PERPETUAL"
+                    },
+                    {
+                        "amount": 1,
+                        "instrument_name": "BTC-27DEC24"
+                    }
+                ],
+                "creation_timestamp": 1719561600000_i64,
+                "instrument_id": 456789,
+                "state_timestamp": 1719561600000_i64
+            }
+        ],
+        "usIn": 1765308000000000_u64,
+        "usOut": 1765308000000500_u64,
+        "usDiff": 500,
+        "testnet": true
+    }))
+    .into_response()
+}
+
 async fn handle_get_instruments(id: u64, params: Option<Value>) -> Response {
     let currency = params
         .as_ref()
@@ -154,6 +334,18 @@ async fn handle_get_instruments(id: u64, params: Option<Value>) -> Response {
         Some("any" | "BTC") | None => {
             let mut data = load_json("http_get_instruments.json");
             data["id"] = json!(id);
+
+            if let Some(result) = data.get_mut("result")
+                && let Some(instruments) = result.as_array_mut()
+            {
+                for inst in instruments {
+                    if inst.get("kind").and_then(|k| k.as_str()) == Some("future_combo")
+                        && inst.get("expiration_timestamp").is_none()
+                    {
+                        inst["expiration_timestamp"] = json!(1_767_225_600_000_i64);
+                    }
+                }
+            }
 
             if let Some(kind) = params
                 .as_ref()
@@ -256,11 +448,18 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             }
 
                             for channel in &subscribed_channels {
-                                // Send a payload matching the subscribed channel's instrument
-                                // so the handler's cache lookup keys to the right instrument
                                 let payload_owned: Option<Value> = if channel.starts_with("trades.")
                                 {
-                                    Some(trades_payload.clone())
+                                    let has_combo_parent =
+                                        state.subscriptions.lock().await.iter().any(|channel| {
+                                            trade_symbol_from_channel(channel)
+                                                == Some("BTC-COMBO-1")
+                                        });
+                                    Some(trade_payload_for_channel(
+                                        &trades_payload,
+                                        channel,
+                                        has_combo_parent,
+                                    ))
                                 } else if channel.starts_with("book.") {
                                     Some(book_snapshot_payload.clone())
                                 } else if let Some(symbol) = channel.strip_prefix("quote.") {
@@ -294,6 +493,11 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
 
                             for channel in channels {
                                 if let Some(channel_str) = channel.as_str() {
+                                    state
+                                        .subscription_events
+                                        .lock()
+                                        .await
+                                        .push((channel_str.to_string(), false));
                                     unsubscribed.push(channel_str.to_string());
                                 }
                             }
@@ -426,7 +630,7 @@ async fn start_test_server()
             let client = http_client.clone();
             async move { client.get(url, None, None, Some(1), None).await.is_ok() }
         },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -455,6 +659,70 @@ fn create_test_config(addr: SocketAddr) -> DeribitDataClientConfig {
 
 #[rstest]
 #[tokio::test]
+async fn test_data_client_request_instrument_refetches_when_cached() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    replace_data_event_sender(tx);
+
+    let config = create_test_config(addr);
+    let client = DeribitDataClient::new(*DERIBIT_CLIENT_ID, config).unwrap();
+    let instrument_id = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
+
+    let first_request_id = UUID4::new();
+    client
+        .request_instrument(RequestInstrument::new(
+            instrument_id,
+            None,
+            None,
+            Some(*DERIBIT_CLIENT_ID),
+            first_request_id,
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("first request_instrument");
+
+    wait_until_async(
+        || async {
+            state.get_instrument_request_count.load(Ordering::Relaxed) >= 1 && !rx.is_empty()
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+    let events = drain_data_events(&mut rx, Duration::from_millis(200)).await;
+    let response = instrument_response(&events).expect("instrument response");
+    assert_eq!(response.correlation_id, first_request_id);
+    assert_eq!(response.client_id, *DERIBIT_CLIENT_ID);
+    assert_eq!(response.instrument_id, instrument_id);
+
+    state.fail_get_instrument.store(true, Ordering::Relaxed);
+
+    client
+        .request_instrument(RequestInstrument::new(
+            instrument_id,
+            None,
+            None,
+            Some(*DERIBIT_CLIENT_ID),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("second request_instrument");
+
+    wait_until_async(
+        || async { state.get_instrument_request_count.load(Ordering::Relaxed) >= 2 },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    let events = drain_data_events(&mut rx, Duration::from_millis(300)).await;
+    assert!(
+        instrument_response(&events).is_none(),
+        "request_instrument must not emit a stale cached response when Deribit returns an error; events were: {events:?}",
+    );
+}
+
+#[rstest]
+#[tokio::test]
 async fn test_data_client_connect_disconnect() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
@@ -469,7 +737,7 @@ async fn test_data_client_connect_disconnect() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
     assert_eq!(*state.connection_count.lock().await, 1);
@@ -491,7 +759,7 @@ async fn test_data_client_subscribe_trades() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -511,11 +779,11 @@ async fn test_data_client_subscribe_trades() {
 
     wait_until_async(
         || async { !state.subscription_events.lock().await.is_empty() },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    let event = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
         .await
         .expect("timeout waiting for event")
         .expect("channel closed");
@@ -524,6 +792,367 @@ async fn test_data_client_subscribe_trades() {
         matches!(event, DataEvent::Data(Data::Trade(_))),
         "Expected Trade event, was: {event:?}"
     );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_data_client_subscribe_combo_legs_expands_trade_channels() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_test_config(addr);
+    config.product_types = vec![DeribitProductType::Future, DeribitProductType::FutureCombo];
+    let mut client = DeribitDataClient::new(*DERIBIT_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+
+    wait_until_async(
+        || async { *state.connection_count.lock().await > 0 },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    state.subscription_events.lock().await.clear();
+
+    let instrument_id = InstrumentId::from("BTC-COMBO-1.DERIBIT");
+    let mut params = Params::new();
+    params.insert("subscribe_combo_legs".to_string(), json!(true));
+
+    let subscribe = SubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        Some(params.clone()),
+    );
+    client.subscribe_trades(subscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            subscription_event_trade_symbols(&state, true).await
+                == sorted_strings(&["BTC-27DEC24", "BTC-COMBO-1", "BTC-PERPETUAL"])
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    let unsubscribe = UnsubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        None,
+    );
+    client.unsubscribe_trades(&unsubscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            subscription_event_trade_symbols(&state, false).await
+                == sorted_strings(&["BTC-27DEC24", "BTC-COMBO-1", "BTC-PERPETUAL"])
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_data_client_subscribe_combo_legs_delivers_parent_and_leg_trades() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_test_config(addr);
+    config.product_types = vec![DeribitProductType::Future, DeribitProductType::FutureCombo];
+    let mut client = DeribitDataClient::new(*DERIBIT_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+
+    wait_until_async(
+        || async { *state.connection_count.lock().await > 0 },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    while rx.try_recv().is_ok() {}
+    state.subscription_events.lock().await.clear();
+
+    let instrument_id = InstrumentId::from("BTC-COMBO-1.DERIBIT");
+    let mut params = Params::new();
+    params.insert("subscribe_combo_legs".to_string(), json!(true));
+
+    let subscribe = SubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        Some(params),
+    );
+    client.subscribe_trades(subscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            subscription_event_trade_symbols(&state, true).await
+                == sorted_strings(&["BTC-27DEC24", "BTC-COMBO-1", "BTC-PERPETUAL"])
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    let trades = collect_trade_ticks(&mut rx, 3).await;
+    let instrument_ids = trades
+        .iter()
+        .map(|trade| trade.instrument_id)
+        .collect::<AHashSet<_>>();
+    let expected_instrument_ids = [
+        InstrumentId::from("BTC-COMBO-1.DERIBIT"),
+        InstrumentId::from("BTC-PERPETUAL.DERIBIT"),
+        InstrumentId::from("BTC-27DEC24.DERIBIT"),
+    ]
+    .into_iter()
+    .collect::<AHashSet<_>>();
+    assert_eq!(instrument_ids, expected_instrument_ids,);
+
+    let trades_by_instrument = trades
+        .into_iter()
+        .map(|trade| (trade.instrument_id, trade))
+        .collect::<AHashMap<_, _>>();
+
+    assert_eq!(
+        trades_by_instrument
+            .get(&InstrumentId::from("BTC-COMBO-1.DERIBIT"))
+            .unwrap()
+            .trade_id
+            .to_string(),
+        "900001"
+    );
+    assert_eq!(
+        trades_by_instrument
+            .get(&InstrumentId::from("BTC-PERPETUAL.DERIBIT"))
+            .unwrap()
+            .trade_id
+            .to_string(),
+        "COMBO-900002"
+    );
+    assert_eq!(
+        trades_by_instrument
+            .get(&InstrumentId::from("BTC-27DEC24.DERIBIT"))
+            .unwrap()
+            .trade_id
+            .to_string(),
+        "COMBO-900003"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_data_client_subscribe_combo_legs_repeated_unsubscribes_last_reference() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_test_config(addr);
+    config.product_types = vec![DeribitProductType::Future, DeribitProductType::FutureCombo];
+    let mut client = DeribitDataClient::new(*DERIBIT_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+
+    wait_until_async(
+        || async { *state.connection_count.lock().await > 0 },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    state.subscription_events.lock().await.clear();
+
+    let instrument_id = InstrumentId::from("BTC-COMBO-1.DERIBIT");
+    let mut params = Params::new();
+    params.insert("subscribe_combo_legs".to_string(), json!(true));
+
+    let first_subscribe = SubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        Some(params.clone()),
+    );
+    client.subscribe_trades(first_subscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            subscription_event_trade_symbols(&state, true).await
+                == sorted_strings(&["BTC-27DEC24", "BTC-COMBO-1", "BTC-PERPETUAL"])
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    state.subscription_events.lock().await.clear();
+
+    let second_subscribe = SubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        Some(params),
+    );
+    client.subscribe_trades(second_subscribe).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.subscription_events.lock().await.is_empty());
+
+    let unsubscribe = UnsubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        None,
+    );
+    client.unsubscribe_trades(&unsubscribe).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.subscription_events.lock().await.is_empty());
+
+    client.unsubscribe_trades(&unsubscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            subscription_event_trade_symbols(&state, false).await
+                == sorted_strings(&["BTC-27DEC24", "BTC-COMBO-1", "BTC-PERPETUAL"])
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some(false))]
+#[tokio::test]
+async fn test_data_client_subscribe_combo_legs_requires_opt_in(#[case] opt_in: Option<bool>) {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_test_config(addr);
+    config.product_types = vec![DeribitProductType::Future, DeribitProductType::FutureCombo];
+    let mut client = DeribitDataClient::new(*DERIBIT_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+
+    wait_until_async(
+        || async { *state.connection_count.lock().await > 0 },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    state.subscription_events.lock().await.clear();
+
+    let instrument_id = InstrumentId::from("BTC-COMBO-1.DERIBIT");
+    let params = opt_in.map(|value| {
+        let mut params = Params::new();
+        params.insert("subscribe_combo_legs".to_string(), json!(value));
+        params
+    });
+
+    let subscribe = SubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        params,
+    );
+    client.subscribe_trades(subscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            let events = state.subscription_events.lock().await;
+            events.iter().any(|(channel, is_subscribe)| {
+                *is_subscribe && trade_symbol_from_channel(channel) == Some("BTC-COMBO-1")
+            })
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let events = state.subscription_events.lock().await;
+    let subscribed = events
+        .iter()
+        .filter(|(_, is_subscribe)| *is_subscribe)
+        .filter_map(|(channel, _)| trade_symbol_from_channel(channel))
+        .collect::<Vec<_>>();
+
+    assert_eq!(subscribed, vec!["BTC-COMBO-1"]);
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_data_client_subscribe_combo_legs_after_lazy_loading_combo() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+
+    let mut config = create_test_config(addr);
+    config.auto_load_missing_instruments = true;
+    let mut client = DeribitDataClient::new(*DERIBIT_CLIENT_ID, config).unwrap();
+    client.connect().await.unwrap();
+
+    wait_until_async(
+        || async { *state.connection_count.lock().await > 0 },
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    state.subscription_events.lock().await.clear();
+
+    let instrument_id = InstrumentId::from("BTC-COMBO-1.DERIBIT");
+    let mut params = Params::new();
+    params.insert("subscribe_combo_legs".to_string(), json!(true));
+
+    let subscribe = SubscribeTrades::new(
+        instrument_id,
+        Some(*DERIBIT_CLIENT_ID),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+        Some(params),
+    );
+    client.subscribe_trades(subscribe).unwrap();
+
+    wait_until_async(
+        || async {
+            let subscribed = subscription_event_trade_symbols(&state, true).await;
+
+            subscribed.contains(&"BTC-COMBO-1".to_string())
+                && subscribed.contains(&"BTC-PERPETUAL".to_string())
+                && subscribed.contains(&"BTC-27DEC24".to_string())
+        },
+        TEST_TIMEOUT,
+    )
+    .await;
 
     client.disconnect().await.unwrap();
 }
@@ -541,7 +1170,7 @@ async fn test_data_client_subscribe_quotes() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -568,11 +1197,11 @@ async fn test_data_client_subscribe_quotes() {
                 .iter()
                 .any(|(topic, _)| topic.contains("quote."))
         },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    let event = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
         .await
         .expect("timeout waiting for event")
         .expect("channel closed");
@@ -598,7 +1227,7 @@ async fn test_data_client_subscribe_book_deltas() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -628,11 +1257,11 @@ async fn test_data_client_subscribe_book_deltas() {
                 .iter()
                 .any(|(topic, _)| topic.contains("book."))
         },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    let event = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
         .await
         .expect("timeout waiting for event")
         .expect("channel closed");
@@ -719,7 +1348,7 @@ async fn test_subscribe_quotes_uncached_instrument_lazy_loads() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -746,7 +1375,7 @@ async fn test_subscribe_quotes_uncached_instrument_lazy_loads() {
     // and the handler matched the inbound frame against the option (not the
     // already-cached BTC-PERPETUAL).
     let mut received_option_quote = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + TEST_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if let Ok(Some(DataEvent::Data(Data::Quote(q)))) =
             tokio::time::timeout(Duration::from_millis(250), rx.recv()).await
@@ -781,7 +1410,7 @@ async fn test_subscribe_quotes_lazy_load_http_failure_skips_ws_subscribe() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -980,7 +1609,7 @@ async fn test_subscribe_funding_rates_rejects_non_perpetual() {
 
     wait_until_async(
         || async { *state.connection_count.lock().await > 0 },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 
@@ -1041,7 +1670,7 @@ async fn test_data_client_emits_instruments_on_connect() {
             let count = counter.load(Ordering::Relaxed);
             async move { count > 0 }
         },
-        Duration::from_secs(5),
+        TEST_TIMEOUT,
     )
     .await;
 

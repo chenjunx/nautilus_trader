@@ -48,7 +48,7 @@ use ustr::Ustr;
 
 use crate::{
     common::{
-        enums::{AxCandleWidth, AxInstrumentState, AxMarketDataLevel},
+        enums::{AxCandleWidth, AxInstrumentState, AxMarketDataLevel, AxTimeInForce},
         parse::ax_timestamp_stn_to_unix_nanos,
     },
     execution::{
@@ -74,9 +74,9 @@ use crate::{
 /// at the Python boundary for parsing venue messages into Nautilus domain types.
 #[pyclass(
     name = "AxMdWebSocketClient",
-    module = "nautilus_trader.core.nautilus_pyo3.architect"
+    module = "nautilus_trader.core.nautilus_pyo3.architect_ax"
 )]
-#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.architect_ax")]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.architect_ax")]
 pub struct PyAxMdWebSocketClient {
     inner: AxMdWebSocketClient,
     instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
@@ -457,9 +457,9 @@ impl PyAxMdWebSocketClient {
 /// parsing at the Python boundary.
 #[pyclass(
     name = "AxOrdersWebSocketClient",
-    module = "nautilus_trader.core.nautilus_pyo3.architect"
+    module = "nautilus_trader.core.nautilus_pyo3.architect_ax"
 )]
-#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.architect_ax")]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.architect_ax")]
 pub struct PyAxOrdersWebSocketClient {
     inner: AxOrdersWebSocketClient,
 }
@@ -602,7 +602,7 @@ impl PyAxOrdersWebSocketClient {
                             );
                         }
                         AxOrdersWsMessage::Error(err) => {
-                            log::error!(
+                            log::warn!(
                                 "AX orders WebSocket error: code={:?}, message={}, rid={:?}",
                                 err.code,
                                 err.message,
@@ -613,7 +613,7 @@ impl PyAxOrdersWebSocketClient {
                             log::info!("AX orders WebSocket reconnected");
                         }
                         AxOrdersWsMessage::Authenticated => {
-                            log::info!("AX orders WebSocket authenticated");
+                            log::debug!("AX orders WebSocket authenticated");
                         }
                     }
                 }
@@ -909,7 +909,7 @@ fn handle_md_message(
         AxMdMessage::Heartbeat(_) => {}
         AxMdMessage::SubscriptionResponse(_) => {}
         AxMdMessage::Error(err) => {
-            log::error!("AX market data error: {err:?}");
+            log::warn!("AX market data error: {err:?}");
         }
     }
 }
@@ -970,7 +970,15 @@ fn handle_order_event(
             }
         }
         AxWsOrderEvent::Expired(msg) => {
-            if let Some(event) =
+            // AX reports an unfilled IOC/FOK as EXPIRED; Nautilus models those as canceled
+            if matches!(msg.o.tif, AxTimeInForce::Ioc | AxTimeInForce::Fok) {
+                if let Some(event) =
+                    create_order_canceled(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
+                {
+                    cleanup_terminal_order_tracking(&msg.o, caches);
+                    call_python_with_event(call_soon, callback, move |py| event.into_py_any(py));
+                }
+            } else if let Some(event) =
                 create_order_expired(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
             {
                 cleanup_terminal_order_tracking(&msg.o, caches);

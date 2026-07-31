@@ -62,7 +62,7 @@ use crate::{
         message::WsMessage,
         parse::{
             parse_derivative_ticker_index_price, parse_derivative_ticker_mark_price,
-            parse_tardis_ws_message, parse_tardis_ws_message_funding_rate,
+            parse_tardis_ws_message_data, parse_tardis_ws_message_funding_rate,
         },
         types::{TardisInstrumentKey, TardisInstrumentMiniInfo},
     },
@@ -150,6 +150,7 @@ impl TardisDataClient {
         url: String,
         instrument_map: AHashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>>,
         book_snapshot_output: BookSnapshotOutput,
+        extract_bbo_as_quotes: bool,
         is_stream_mode: bool,
     ) {
         let sender = self.data_sender.clone();
@@ -167,6 +168,7 @@ impl TardisDataClient {
                 &sender,
                 &instrument_map,
                 &book_snapshot_output,
+                extract_bbo_as_quotes,
             )
             .await;
 
@@ -217,6 +219,7 @@ impl TardisDataClient {
                             &sender,
                             &instrument_map,
                             &book_snapshot_output,
+                            extract_bbo_as_quotes,
                         )
                         .await;
 
@@ -255,6 +258,7 @@ impl TardisDataClient {
         sender: &UnboundedSender<DataEvent>,
         instrument_map: &AHashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>>,
         book_snapshot_output: &BookSnapshotOutput,
+        extract_bbo_as_quotes: bool,
     ) -> bool {
         let (mut writer, mut reader) = ws_stream.split();
 
@@ -285,6 +289,7 @@ impl TardisDataClient {
             sender,
             instrument_map,
             book_snapshot_output,
+            extract_bbo_as_quotes,
         )
         .await;
 
@@ -347,6 +352,7 @@ impl TardisDataClient {
         sender: &UnboundedSender<DataEvent>,
         instrument_map: &AHashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>>,
         book_snapshot_output: &BookSnapshotOutput,
+        extract_bbo_as_quotes: bool,
     ) -> bool {
         let mut ticker_cache = DerivativeTickerCache::default();
 
@@ -381,18 +387,18 @@ impl TardisDataClient {
                                         return false;
                                     }
                                 } else {
-                                    let event = parse_tardis_ws_message(
+                                    let data = parse_tardis_ws_message_data(
                                         ws_msg,
                                         &info,
                                         book_snapshot_output,
-                                    )
-                                    .map(DataEvent::Data);
+                                        extract_bbo_as_quotes,
+                                    );
 
-                                    if let Some(event) = event
-                                        && let Err(e) = sender.send(event)
-                                    {
-                                        log::error!("Failed to send data event: {e}");
-                                        return false;
+                                    for data in data {
+                                        if let Err(e) = sender.send(DataEvent::Data(data)) {
+                                            log::error!("Failed to send data event: {e}");
+                                            return false;
+                                        }
                                     }
                                 }
                             }
@@ -404,19 +410,19 @@ impl TardisDataClient {
                 }
                 Some(Ok(tungstenite::Message::Close(frame))) => {
                     if let Some(frame) = frame {
-                        log::info!("WebSocket closed: {} {}", frame.code, frame.reason);
+                        log::debug!("WebSocket closed: {} {}", frame.code, frame.reason);
                     } else {
-                        log::info!("WebSocket closed");
+                        log::debug!("WebSocket closed");
                     }
                     return true;
                 }
                 Some(Ok(_)) => {}
                 Some(Err(e)) => {
-                    log::error!("WebSocket error: {e}");
+                    log::warn!("WebSocket error: {e}");
                     return true;
                 }
                 None => {
-                    log::info!("Stream ended");
+                    log::debug!("Stream ended");
                     return true;
                 }
             }
@@ -473,33 +479,27 @@ impl DataClient for TardisDataClient {
         !self.is_connected()
     }
 
-    fn subscribe_mark_prices(&mut self, cmd: SubscribeMarkPrices) -> anyhow::Result<()> {
-        log::info!("Subscribed mark prices for {}", cmd.instrument_id);
+    fn subscribe_mark_prices(&mut self, _cmd: SubscribeMarkPrices) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn subscribe_index_prices(&mut self, cmd: SubscribeIndexPrices) -> anyhow::Result<()> {
-        log::info!("Subscribed index prices for {}", cmd.instrument_id);
+    fn subscribe_index_prices(&mut self, _cmd: SubscribeIndexPrices) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn subscribe_funding_rates(&mut self, cmd: SubscribeFundingRates) -> anyhow::Result<()> {
-        log::info!("Subscribed funding rates for {}", cmd.instrument_id);
+    fn subscribe_funding_rates(&mut self, _cmd: SubscribeFundingRates) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn unsubscribe_mark_prices(&mut self, cmd: &UnsubscribeMarkPrices) -> anyhow::Result<()> {
-        log::info!("Unsubscribed mark prices for {}", cmd.instrument_id);
+    fn unsubscribe_mark_prices(&mut self, _cmd: &UnsubscribeMarkPrices) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn unsubscribe_index_prices(&mut self, cmd: &UnsubscribeIndexPrices) -> anyhow::Result<()> {
-        log::info!("Unsubscribed index prices for {}", cmd.instrument_id);
+    fn unsubscribe_index_prices(&mut self, _cmd: &UnsubscribeIndexPrices) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn unsubscribe_funding_rates(&mut self, cmd: &UnsubscribeFundingRates) -> anyhow::Result<()> {
-        log::info!("Unsubscribed funding rates for {}", cmd.instrument_id);
+    fn unsubscribe_funding_rates(&mut self, _cmd: &UnsubscribeFundingRates) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -514,6 +514,7 @@ impl DataClient for TardisDataClient {
 
         let is_stream_mode = self.is_stream_mode();
         let book_snapshot_output = self.config.book_snapshot_output.clone();
+        let extract_bbo_as_quotes = self.config.extract_bbo_as_quotes;
 
         let http_client = TardisHttpClient::new(
             self.config.api_key.as_deref(),
@@ -564,6 +565,7 @@ impl DataClient for TardisDataClient {
             url,
             instrument_map,
             book_snapshot_output,
+            extract_bbo_as_quotes,
             is_stream_mode,
         );
         self.is_connected.store(true, Ordering::Release);

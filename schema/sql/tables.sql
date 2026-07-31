@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS "instrument" (
     settlement_currency TEXT REFERENCES currency(id),
     isin TEXT,
     exchange TEXT,
+    strategy_type TEXT,
     option_kind TEXT,
     strike_price TEXT,
     activation_ns TEXT,
@@ -167,6 +168,41 @@ CREATE TABLE IF NOT EXISTS "order_event" (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS "order_position_index" (
+    client_order_id TEXT PRIMARY KEY NOT NULL,
+    position_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS "position_event" (
+    event_sequence BIGSERIAL PRIMARY KEY NOT NULL,
+    id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    trader_id TEXT REFERENCES trader(id) ON DELETE CASCADE,
+    strategy_id TEXT NOT NULL,
+    instrument_id TEXT REFERENCES instrument(id) ON DELETE CASCADE,
+    client_order_id TEXT NOT NULL,
+    venue_order_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL,
+    currency TEXT REFERENCES currency(id),
+    order_type TEXT NOT NULL,
+    order_side TEXT NOT NULL,
+    last_px TEXT NOT NULL,
+    last_qty TEXT NOT NULL,
+    liquidity_side TEXT NOT NULL,
+    position_id TEXT NOT NULL,
+    commission TEXT,
+    ts_event TEXT NOT NULL,
+    ts_init TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_event_position_id
+    ON position_event(position_id, event_sequence);
 
 CREATE TABLE IF NOT EXISTS "position"(
     id TEXT PRIMARY KEY NOT NULL,
@@ -305,6 +341,13 @@ CREATE TABLE IF NOT EXISTS "block" (
 ) PARTITION BY LIST (chain_id);
 CREATE TABLE IF NOT EXISTS "block_default" PARTITION OF "block" DEFAULT;
 
+CREATE TABLE IF NOT EXISTS "pool_event_block" (
+    chain_id INTEGER NOT NULL REFERENCES chain(chain_id) ON DELETE CASCADE,
+    number BIGINT NOT NULL,
+    timestamp TEXT NOT NULL,
+    PRIMARY KEY (chain_id, number)
+);
+
 CREATE TABLE IF NOT EXISTS "token"(
     chain_id INTEGER NOT NULL REFERENCES chain(chain_id) ON DELETE CASCADE,
     address TEXT NOT NULL,
@@ -421,6 +464,44 @@ CREATE TABLE IF NOT EXISTS "pool_collect_event" (
 CREATE INDEX IF NOT EXISTS idx_pool_collect_event_lookup
     ON pool_collect_event(chain_id, pool_identifier, block, transaction_index, log_index);
 
+CREATE TABLE IF NOT EXISTS "pool_fee_protocol_update_event" (
+    id BIGSERIAL PRIMARY KEY,
+    chain_id INTEGER NOT NULL REFERENCES chain(chain_id) ON DELETE CASCADE,
+    pool_identifier TEXT NOT NULL,
+    dex_name TEXT NOT NULL,
+    block BIGINT NOT NULL,
+    transaction_hash TEXT NOT NULL,
+    transaction_index INTEGER NOT NULL,
+    log_index INTEGER NOT NULL,
+    fee_protocol0_new SMALLINT NOT NULL,
+    fee_protocol1_new SMALLINT NOT NULL,
+    FOREIGN KEY (chain_id, dex_name, pool_identifier) REFERENCES pool(chain_id, dex_name, pool_identifier),
+--     FOREIGN KEY (chain_id, block) REFERENCES block(chain_id, number),  // TODO temporarily disabled not to be blocked by full block sync
+    UNIQUE(chain_id, transaction_hash, log_index)
+);
+CREATE INDEX IF NOT EXISTS idx_pool_fee_protocol_update_event_lookup
+    ON pool_fee_protocol_update_event(chain_id, pool_identifier, block, transaction_index, log_index);
+
+CREATE TABLE IF NOT EXISTS "pool_fee_protocol_collect_event" (
+    id BIGSERIAL PRIMARY KEY,
+    chain_id INTEGER NOT NULL REFERENCES chain(chain_id) ON DELETE CASCADE,
+    pool_identifier TEXT NOT NULL,
+    dex_name TEXT NOT NULL,
+    block BIGINT NOT NULL,
+    transaction_hash TEXT NOT NULL,
+    transaction_index INTEGER NOT NULL,
+    log_index INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    amount0 U256 NOT NULL,
+    amount1 U256 NOT NULL,
+    FOREIGN KEY (chain_id, dex_name, pool_identifier) REFERENCES pool(chain_id, dex_name, pool_identifier),
+--     FOREIGN KEY (chain_id, block) REFERENCES block(chain_id, number),  // TODO temporarily disabled not to be blocked by full block sync
+    UNIQUE(chain_id, transaction_hash, log_index)
+);
+CREATE INDEX IF NOT EXISTS idx_pool_fee_protocol_collect_event_lookup
+    ON pool_fee_protocol_collect_event(chain_id, pool_identifier, block, transaction_index, log_index);
+
 CREATE TABLE IF NOT EXISTS "pool_flash_event" (
     id BIGSERIAL PRIMARY KEY,
     chain_id INTEGER NOT NULL REFERENCES chain(chain_id) ON DELETE CASCADE,
@@ -469,11 +550,14 @@ CREATE TABLE IF NOT EXISTS "pool_snapshot" (
     total_flashes INTEGER NOT NULL DEFAULT 0,
     total_fee_collects INTEGER NOT NULL,
     liquidity_utilization_rate  DOUBLE PRECISION DEFAULT 0,
-    is_valid BOOLEAN DEFAULT FALSE,
+    validation_state TEXT NOT NULL DEFAULT 'replay' CHECK (validation_state IN ('on_chain', 'replay', 'invalid')),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chain_id, pool_identifier, block, transaction_index, log_index),
     FOREIGN KEY (chain_id, dex_name, pool_identifier) REFERENCES pool(chain_id, dex_name, pool_identifier)
 );
+-- Bring databases created before snapshot validation states forward. Existing rows become 'replay'
+-- (usable as replay start points) until a later analyze-pool run re-validates them to 'on_chain' or 'invalid'.
+ALTER TABLE "pool_snapshot" ADD COLUMN IF NOT EXISTS validation_state TEXT NOT NULL DEFAULT 'replay';
 
 CREATE TABLE IF NOT EXISTS "pool_position" (
     chain_id INTEGER NOT NULL,

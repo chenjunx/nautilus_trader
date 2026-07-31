@@ -69,6 +69,11 @@ register_serializable_type(
 
 
 _binance_mod = nautilus_pyo3.binance  # type: ignore[attr-defined]
+BinanceFuturesLiquidation = _binance_mod.BinanceFuturesLiquidation
+BinanceFuturesTicker = _binance_mod.BinanceFuturesTicker
+BinanceFuturesOpenInterest = _binance_mod.BinanceFuturesOpenInterest
+BinanceFuturesOpenInterestHistPoint = _binance_mod.BinanceFuturesOpenInterestHistPoint
+BinanceFuturesOpenInterestHist = _binance_mod.BinanceFuturesOpenInterestHist
 
 
 def _convert_binance_bar_to_pyo3(bar: BinanceBar) -> object:
@@ -120,7 +125,12 @@ __all__ = [
     "BinanceDataClientConfig",
     "BinanceExecClientConfig",
     "BinanceFuturesInstrumentProvider",
+    "BinanceFuturesLiquidation",
     "BinanceFuturesMarkPriceUpdate",
+    "BinanceFuturesOpenInterest",
+    "BinanceFuturesOpenInterestHist",
+    "BinanceFuturesOpenInterestHistPoint",
+    "BinanceFuturesTicker",
     "BinanceInstrumentProviderConfig",
     "BinanceKeyType",
     "BinanceLiveDataClientFactory",

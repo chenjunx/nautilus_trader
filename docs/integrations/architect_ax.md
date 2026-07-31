@@ -200,7 +200,8 @@ data is available via WebSocket L1 book subscriptions.
 
 ## Orders capability
 
-AX Exchange supports market and limit order types with stop triggers.
+AX Exchange supports market and limit order types only. The venue has no native
+stop/conditional orders (the place-order payload has no trigger or order-type field).
 
 ### Order types
 
@@ -208,8 +209,8 @@ AX Exchange supports market and limit order types with stop triggers.
 |------------------------|-----------|----------------------------------------------------|
 | `MARKET`               | ✓         | Execute immediately at best available price.       |
 | `LIMIT`                | ✓         | Execute at specified price or better.              |
-| `STOP_LIMIT`           | ✓         | Trigger a limit order when stop price is breached. |
-| `LIMIT_IF_TOUCHED`     | -         | *Not currently implemented by AX Exchange*.        |
+| `STOP_LIMIT`           | -         | *Not supported by AX Exchange*.                    |
+| `LIMIT_IF_TOUCHED`     | -         | *Not supported by AX Exchange*.                    |
 | `STOP_MARKET`          | -         | *Not supported*.                                   |
 | `MARKET_IF_TOUCHED`    | -         | *Not supported*.                                   |
 | `TRAILING_STOP_MARKET` | -         | *Not supported*.                                   |
@@ -223,15 +224,17 @@ AX Exchange supports market and limit order types with stop triggers.
 
 ### Time in force
 
-| Time in Force | Supported | Notes                                        |
-|---------------|-----------|----------------------------------------------|
-| `GTC`         | ✓         | Good Till Canceled.                          |
-| `GTD`         | -         | *Not supported by AX Exchange*.              |
-| `DAY`         | ✓         | Valid until end of trading day.              |
-| `IOC`         | ✓         | Immediate or Cancel.                         |
-| `FOK`         | ✓         | Fill or Kill.                                |
-| `AT_THE_OPEN` | ✓         | Execute at market open or expire.            |
-| `AT_THE_CLOSE`| ✓         | Execute at market close or expire.           |
+| Time in Force | Supported | Notes                           |
+|---------------|-----------|---------------------------------|
+| `GTC`         | ✓         | Good Till Canceled.             |
+| `GTD`         | -         | *Not supported by AX Exchange*. |
+| `DAY`         | ✓         | Valid until end of trading day. |
+| `IOC`         | ✓         | Immediate or Cancel.            |
+| `FOK`         | -         | *Not supported by AX Exchange*. |
+| `AT_THE_OPEN` | -         | *Not supported by AX Exchange*. |
+| `AT_THE_CLOSE`| -         | *Not supported by AX Exchange*. |
+
+The venue deprecates `DAY` and recommends `GTC` instead.
 
 ### Advanced order features
 
@@ -308,6 +311,7 @@ from market data endpoints. This is handled automatically by the adapter configu
 | `recv_window_ms`                   | `5000`    | Receive window (milliseconds) for signed requests.                  |
 | `update_instruments_interval_mins` | `60`      | Interval (minutes) between instrument catalog refreshes.            |
 | `funding_rate_poll_interval_mins`  | `15`      | Interval (minutes) between funding rate poll requests.              |
+| `transport_backend`                | `Sockudo` | WebSocket transport backend.                                        |
 
 ### Execution client configuration options
 
@@ -327,6 +331,7 @@ from market data endpoints. This is handled automatically by the adapter configu
 | `heartbeat_interval_secs` | `30`      | Heartbeat interval (seconds) for WebSocket connections.             |
 | `recv_window_ms`          | `5000`    | Receive window (milliseconds) for signed requests.                  |
 | `cancel_on_disconnect`    | `false`   | Cancel all open orders when the orders WebSocket disconnects.       |
+| `transport_backend`       | `Sockudo` | WebSocket transport backend.                                        |
 
 The most common use case is to configure a live `TradingNode` to include AX Exchange
 data and execution clients. To achieve this, add an `AX` section to your client
@@ -395,7 +400,7 @@ credentials are valid and have trading permissions.
 ## Implementation notes
 
 - **Whole contracts only**: AX Exchange uses integer contract quantities. Fractional quantities
-  are not supported and will be rejected.
+  are not supported; the adapter generates `OrderDenied` locally.
 - **Rate limiting**: The adapter applies a conservative rate limit of 10 requests/second with
   automatic exponential backoff on rate limit responses.
 - **Market orders**: AX does not support native market orders. The adapter uses a preview endpoint
@@ -408,6 +413,11 @@ credentials are valid and have trading permissions.
 - **Fill commissions**: Real-time fill events from the WebSocket do not include fee data.
   Commission is reported as zero for streaming fills. During reconciliation, the REST
   `/fills` endpoint provides accurate fee information.
+- **Fill reconciliation window**: The `/fills` endpoint requires a bounded time range and
+  caps the span at seven days. Reconciliation requests the most recent seven days of fills;
+  fills older than that are not reconciled.
+- **Unfilled IOC/FOK**: AX reports an unfilled immediate order as an expiry; the adapter maps
+  it to `OrderCanceled` to match NautilusTrader semantics.
 
 ## Contributing
 

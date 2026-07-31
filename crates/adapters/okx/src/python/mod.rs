@@ -116,6 +116,7 @@ fn extract_okx_exec_config(py: Python<'_>, config: Py<PyAny>) -> PyResult<Box<dy
 /// Returns an error if any bindings fail to register with the Python module.
 #[pymodule]
 pub fn okx(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(stringify!(OKX), OKX)?;
     m.add_class::<super::websocket::OKXWebSocketClient>()?;
     m.add_class::<super::websocket::messages::OKXWebSocketError>()?;
     m.add_class::<super::http::OKXHttpClient>()?;
@@ -129,6 +130,7 @@ pub fn okx(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::common::enums::OKXPositionMode>()?;
     m.add_class::<crate::common::enums::OKXVipLevel>()?;
     m.add_class::<crate::common::enums::OKXEnvironment>()?;
+    m.add_class::<crate::common::enums::OKXRegion>()?;
     m.add_class::<crate::common::urls::OKXEndpointType>()?;
     m.add_class::<OKXDataClientConfig>()?;
     m.add_class::<OKXExecClientConfig>()?;

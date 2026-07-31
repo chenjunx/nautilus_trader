@@ -398,6 +398,7 @@ pub fn parse_instrument_any(
         margin_maint,
         maker_fee,
         taker_fee,
+        None,
         None, // info: Option<Params>
         ts_init,
         ts_init,
@@ -412,7 +413,7 @@ pub(super) mod display_fromstr {
 
     use serde::{Deserialize, Deserializer, Serializer, de};
 
-    pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    pub(crate) fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
         T: Display,
         S: Serializer,
@@ -420,7 +421,7 @@ pub(super) mod display_fromstr {
         serializer.collect_str(value)
     }
 
-    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+    pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
     where
         T: FromStr,
         T::Err: Display,
@@ -438,7 +439,7 @@ pub(super) mod display_fromstr_opt {
 
     use serde::{Deserialize, Deserializer, Serializer, de};
 
-    pub fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(crate) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
         T: Display,
         S: Serializer,
@@ -449,7 +450,7 @@ pub(super) mod display_fromstr_opt {
         }
     }
 
-    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
     where
         T: FromStr,
         T::Err: Display,
@@ -1289,6 +1290,17 @@ pub fn parse_fill_report(
             );
         }
         crate::common::enums::DydxFillType::Limit => {}
+        crate::common::enums::DydxFillType::Unknown => {
+            log::warn!(
+                "Unmodeled dYdX fill type: {} id={} order_id={} side={:?} size={} price={}",
+                instrument_id,
+                fill.id,
+                fill.order_id,
+                order_side,
+                fill.size,
+                fill.price,
+            );
+        }
     }
 
     let size_precision = instrument.size_precision();
@@ -1705,6 +1717,7 @@ mod reconciliation_tests {
             Some(dec!(0.03)),                 // margin_maint
             Some(dec!(0.0002)),               // maker_fee
             Some(dec!(0.0005)),               // taker_fee
+            None,                             // tick_scheme
             None,                             // info: Option<Params>
             UnixNanos::default(),             // ts_event
             UnixNanos::default(),             // ts_init

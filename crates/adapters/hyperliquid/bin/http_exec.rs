@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::{env, str::FromStr};
+use std::env;
 
 use nautilus_hyperliquid::{
     common::{credential::Secrets, enums::HyperliquidEnvironment},
@@ -26,7 +26,6 @@ use nautilus_hyperliquid::{
     },
 };
 use nautilus_model::identifiers::ClientOrderId;
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 #[tokio::main]
@@ -102,8 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Fetching BTC order book...");
     let book = client.info_l2_book("BTC").await?;
 
-    let best_bid_str = &book.levels[0][0].px;
-    let best_bid = Decimal::from_str(best_bid_str)?;
+    let best_bid = book.levels[0][0].px;
 
     log::info!("Best bid: ${best_bid}");
 
@@ -111,7 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let limit_price = (best_bid * dec!(0.95)).round();
     log::info!("Limit order price: ${limit_price}");
 
-    // Create cloid from a test ClientOrderId (production-like)
     let client_order_id = ClientOrderId::from("O-20241210-TEST-001-001-1");
     let cloid = Cloid::from_client_order_id(client_order_id);
     log::info!("ClientOrderId: {client_order_id}");

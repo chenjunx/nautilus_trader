@@ -45,16 +45,13 @@ use super::{
     enums::{OKXSubscriptionEvent, OKXWsChannel, OKXWsOperation},
     error::OKXWsError,
     messages::{
-        OKXAlgoOrderMsg, OKXOrderMsg, OKXSubscription, OKXSubscriptionArg, OKXWebSocketArg,
-        OKXWebSocketError, OKXWsFrame, OKXWsMessage,
+        OKXOrderMsg, OKXSubscription, OKXSubscriptionArg, OKXWebSocketArg, OKXWebSocketError,
+        OKXWsFrame, OKXWsMessage,
     },
     subscription::topic_from_websocket_arg,
 };
 use crate::{
-    common::{
-        consts::{OKX_FIELD_SCODE, OKX_FIELD_SMSG, OKX_SUCCESS_CODE, should_retry_error_code},
-        models::OKXInstrument,
-    },
+    common::consts::{OKX_FIELD_SMSG, OKX_SUCCESS_CODE, should_retry_error_code},
     websocket::client::OKX_RATE_LIMIT_KEY_SUBSCRIPTION,
 };
 
@@ -95,7 +92,7 @@ pub(super) struct OKXWsFeedHandler {
 
 impl OKXWsFeedHandler {
     /// Creates a new [`OKXWsFeedHandler`] instance.
-    pub fn new(
+    pub(super) fn new(
         signal: Arc<AtomicBool>,
         cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
         raw_rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
@@ -333,29 +330,18 @@ impl OKXWsFeedHandler {
         match channel {
             OKXWsChannel::Account => Some(OKXWsMessage::Account(data)),
             OKXWsChannel::Positions => Some(OKXWsMessage::Positions(data)),
-            OKXWsChannel::Orders => match serde_json::from_value::<Vec<OKXOrderMsg>>(data) {
-                Ok(orders) => Some(OKXWsMessage::Orders(orders)),
-                Err(e) => {
-                    log::error!("Failed to parse orders data: {e}");
-                    None
-                }
-            },
-            OKXWsChannel::OrdersAlgo | OKXWsChannel::AlgoAdvance => {
-                match serde_json::from_value::<Vec<OKXAlgoOrderMsg>>(data) {
-                    Ok(orders) => Some(OKXWsMessage::AlgoOrders(orders)),
-                    Err(e) => {
-                        log::error!("Failed to parse algo orders data: {e}");
-                        None
-                    }
-                }
+            OKXWsChannel::Orders => {
+                parse_array_items(data, "orders", false).map(OKXWsMessage::Orders)
             }
-            OKXWsChannel::Instruments => match serde_json::from_value::<Vec<OKXInstrument>>(data) {
-                Ok(instruments) => Some(OKXWsMessage::Instruments(instruments)),
-                Err(e) => {
-                    log::error!("Failed to parse instruments data: {e}");
-                    None
-                }
-            },
+            OKXWsChannel::SprdOrders => {
+                parse_array_items(data, "spread orders", false).map(OKXWsMessage::SpreadOrders)
+            }
+            OKXWsChannel::OrdersAlgo | OKXWsChannel::AlgoAdvance => {
+                parse_array_items(data, "algo orders", false).map(OKXWsMessage::AlgoOrders)
+            }
+            OKXWsChannel::Instruments => {
+                parse_array_items(data, "instruments", true).map(OKXWsMessage::Instruments)
+            }
             _ => Some(OKXWsMessage::ChannelData {
                 channel,
                 inst_id,
@@ -471,7 +457,11 @@ impl OKXWsFeedHandler {
                 match serde_json::from_str(&text) {
                     Ok(ws_event) => match &ws_event {
                         OKXWsFrame::Error { code, msg } => {
-                            log::error!("WebSocket error: {code} - {msg}");
+                            if should_retry_error_code(code) {
+                                log::warn!("WebSocket error: {code} - {msg}");
+                            } else {
+                                log::error!("WebSocket error: {code} - {msg}");
+                            }
                             Some(ws_event)
                         }
                         OKXWsFrame::Login {
@@ -481,7 +471,7 @@ impl OKXWsFeedHandler {
                             conn_id,
                         } => {
                             if code == OKX_SUCCESS_CODE {
-                                log::info!("WebSocket authenticated: conn_id={conn_id}");
+                                log::debug!("WebSocket authenticated: conn_id={conn_id}");
                             } else {
                                 log::error!(
                                     "WebSocket authentication failed: \
@@ -578,31 +568,6 @@ impl OKXWsFeedHandler {
     }
 }
 
-/// Returns `true` when an OKX WebSocket error payload represents a post-only rejection.
-pub fn is_post_only_rejection(code: &str, data: &[Value]) -> bool {
-    use crate::common::consts::OKX_POST_ONLY_ERROR_CODE;
-
-    if code == OKX_POST_ONLY_ERROR_CODE {
-        return true;
-    }
-
-    for entry in data {
-        if let Some(s_code) = entry.get(OKX_FIELD_SCODE).and_then(|value| value.as_str())
-            && s_code == OKX_POST_ONLY_ERROR_CODE
-        {
-            return true;
-        }
-
-        if let Some(inner_code) = entry.get("code").and_then(|value| value.as_str())
-            && inner_code == OKX_POST_ONLY_ERROR_CODE
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Returns `true` when an OKX WebSocket order message represents a post-only auto-cancel.
 pub fn is_post_only_auto_cancel(msg: &OKXOrderMsg) -> bool {
     use crate::common::{consts::OKX_POST_ONLY_CANCEL_SOURCE, enums::OKXOrderStatus};
@@ -630,6 +595,42 @@ pub fn is_post_only_auto_cancel(msg: &OKXOrderMsg) -> bool {
         .is_none_or(|filled| filled == "0" || filled.is_empty())
 }
 
+// Per-item deserialization so one malformed entry does not drop the batch.
+fn parse_array_items<T: serde::de::DeserializeOwned>(
+    data: Value,
+    label: &str,
+    warn_on_parse_error: bool,
+) -> Option<Vec<T>> {
+    let Value::Array(items) = data else {
+        if warn_on_parse_error {
+            log::warn!("Expected {label} payload to be a JSON array");
+        } else {
+            log::error!("Expected {label} payload to be a JSON array");
+        }
+        return None;
+    };
+
+    let mut parsed = Vec::with_capacity(items.len());
+    for (idx, item) in items.into_iter().enumerate() {
+        match serde_json::from_value::<T>(item) {
+            Ok(value) => parsed.push(value),
+            Err(e) => {
+                if warn_on_parse_error {
+                    log::warn!("Failed to parse {label} item at index {idx}: {e}");
+                } else {
+                    log::error!("Failed to parse {label} item at index {idx}: {e}");
+                }
+            }
+        }
+    }
+
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
 #[inline]
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     haystack
@@ -638,16 +639,28 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+// Specific phrases rather than bare "connection"/"network", which appear
+// in permanent errors too (e.g. "no active WebSocket client connection").
+const RETRYABLE_CLIENT_ERROR_PHRASES: &[&str] = &[
+    "timeout",
+    "timed out",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "connection aborted",
+    "broken pipe",
+    "network unreachable",
+    "network is unreachable",
+    "no route to host",
+];
+
 fn should_retry_okx_error(error: &OKXWsError) -> bool {
     match error {
         OKXWsError::OkxError { error_code, .. } => should_retry_error_code(error_code),
         OKXWsError::TungsteniteError(_) => true,
-        OKXWsError::ClientError(msg) => {
-            contains_ignore_ascii_case(msg, "timeout")
-                || contains_ignore_ascii_case(msg, "timed out")
-                || contains_ignore_ascii_case(msg, "connection")
-                || contains_ignore_ascii_case(msg, "network")
-        }
+        OKXWsError::ClientError(msg) => RETRYABLE_CLIENT_ERROR_PHRASES
+            .iter()
+            .any(|phrase| contains_ignore_ascii_case(msg, phrase)),
         OKXWsError::AuthenticationError(_)
         | OKXWsError::JsonError(_)
         | OKXWsError::ParsingError(_) => false,
@@ -660,25 +673,104 @@ fn create_okx_timeout_error(msg: String) -> OKXWsError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    use nautilus_network::websocket::{AuthTracker, SubscriptionState};
     use rstest::rstest;
     use serde_json::json;
 
     use super::*;
+    use crate::common::{consts::OKX_WS_TOPIC_DELIMITER, testing::load_test_json};
 
-    #[rstest]
-    fn test_is_post_only_rejection_detects_by_code() {
-        assert!(is_post_only_rejection("51019", &[]));
+    fn create_handler() -> OKXWsFeedHandler {
+        let signal = Arc::new(AtomicBool::new(false));
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        OKXWsFeedHandler::new(
+            signal,
+            cmd_rx,
+            raw_rx,
+            out_tx,
+            AuthTracker::new(),
+            SubscriptionState::new(OKX_WS_TOPIC_DELIMITER),
+        )
     }
 
     #[rstest]
-    fn test_is_post_only_rejection_detects_by_inner_code() {
-        let data = vec![json!({ "sCode": "51019" })];
-        assert!(is_post_only_rejection("50000", &data));
+    #[case("Connection reset by peer", true)]
+    #[case("send timeout after 30s", true)]
+    #[case("Connection closed unexpectedly", true)]
+    #[case("Broken pipe", true)]
+    #[case("Network unreachable", true)]
+    #[case("No active WebSocket client connection", false)]
+    #[case("network protocol upgrade required", false)]
+    #[case("invalid frame format", false)]
+    fn test_should_retry_client_error(#[case] msg: &str, #[case] expected: bool) {
+        let err = OKXWsError::ClientError(msg.to_string());
+        assert_eq!(should_retry_okx_error(&err), expected);
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct ParseArrayItem {
+        value: i64,
     }
 
     #[rstest]
-    fn test_is_post_only_rejection_false_for_unrelated_error() {
-        let data = vec![json!({ "sMsg": "Insufficient balance" })];
-        assert!(!is_post_only_rejection("50000", &data));
+    fn test_parse_array_items_keeps_good_items_when_one_fails() {
+        let data = json!([
+            {"value": 1},
+            {"value": "not a number"},
+            {"value": 3},
+        ]);
+
+        let parsed: Vec<ParseArrayItem> =
+            parse_array_items(data, "test", false).expect("non-empty");
+        assert_eq!(
+            parsed,
+            vec![ParseArrayItem { value: 1 }, ParseArrayItem { value: 3 }],
+        );
+    }
+
+    #[rstest]
+    fn test_parse_array_items_returns_none_when_payload_not_array() {
+        let data = json!({"not": "an array"});
+        let parsed: Option<Vec<ParseArrayItem>> = parse_array_items(data, "test", false);
+        assert!(parsed.is_none());
+    }
+
+    #[rstest]
+    fn test_parse_array_items_returns_none_when_all_items_fail() {
+        let data = json!([{"value": "bad"}]);
+        let parsed: Option<Vec<ParseArrayItem>> = parse_array_items(data, "test", false);
+        assert!(parsed.is_none());
+    }
+
+    #[rstest]
+    fn test_route_instruments_keeps_valid_items_when_one_item_fails() {
+        let handler = create_handler();
+        let mut frame: Value =
+            serde_json::from_str(&load_test_json("ws_instruments.json")).expect("valid fixture");
+        let data = frame
+            .get_mut("data")
+            .and_then(Value::as_array_mut)
+            .expect("data array");
+        let mut invalid_item = data[0].clone();
+        invalid_item["tickSz"] = json!(7);
+        data.insert(0, invalid_item);
+
+        let arg: OKXWebSocketArg = serde_json::from_value(frame["arg"].clone()).expect("valid arg");
+        let msg = handler
+            .route_data_message(arg, frame["data"].clone())
+            .expect("instruments message");
+
+        match msg {
+            OKXWsMessage::Instruments(instruments) => {
+                assert_eq!(instruments.len(), 1);
+                assert_eq!(instruments[0].inst_id.as_str(), "BTC-USDT-SWAP");
+            }
+            other => panic!("Expected Instruments, was {other:?}"),
+        }
     }
 }

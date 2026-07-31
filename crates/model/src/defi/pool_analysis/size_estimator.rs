@@ -20,7 +20,7 @@
 
 use alloy_primitives::U256;
 
-use super::PoolProfiler;
+use super::{PoolProfiler, error::PoolEventKind};
 
 /// Configuration for size estimation algorithms.
 ///
@@ -136,10 +136,10 @@ struct BinarySearchState {
 /// The binary search will refine this estimate, so perfect accuracy isn't needed.
 ///
 /// # Arguments
-/// * `profiler` - Reference to the pool profiler
-/// * `impact_bps` - Target impact in basis points
-/// * `zero_for_one` - Swap direction
-/// * `config` - Estimation configuration (only uses `safety_multiplier`)
+/// - `profiler` - Reference to the pool profiler
+/// - `impact_bps` - Target impact in basis points
+/// - `zero_for_one` - Swap direction
+/// - `config` - Estimation configuration (only uses `safety_multiplier`)
 ///
 /// # Returns
 /// Estimated maximum size as U256
@@ -198,7 +198,7 @@ pub fn slippage_for_size_bps(
     size: U256,
     zero_for_one: bool,
 ) -> anyhow::Result<u32> {
-    profiler.check_if_initialized();
+    profiler.check_if_initialized(PoolEventKind::Swap)?;
 
     if size.is_zero() {
         return Ok(0);
@@ -233,7 +233,7 @@ fn binary_search_for_size(
     if impact_bps > 10000 {
         anyhow::bail!("Impact cannot exceed 100% (10000 bps)");
     }
-    profiler.check_if_initialized();
+    profiler.check_if_initialized(PoolEventKind::Swap)?;
 
     // Estimate initial bounds
     let mut low = U256::ZERO;
@@ -358,10 +358,10 @@ pub fn size_for_impact_bps(
 /// bounds used, and timing information.
 ///
 /// # Arguments
-/// * `profiler` - Reference to the pool profiler
-/// * `impact_bps` - Target slippage in basis points (including fees)
-/// * `zero_for_one` - Swap direction (true = token0 for token1)
-/// * `config` - Estimation configuration
+/// - `profiler` - Reference to the pool profiler
+/// - `impact_bps` - Target slippage in basis points (including fees)
+/// - `zero_for_one` - Swap direction (true = token0 for token1)
+/// - `config` - Estimation configuration
 ///
 /// # Returns
 /// Detailed result containing size, search metrics, and convergence information

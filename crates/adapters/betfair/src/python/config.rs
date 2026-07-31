@@ -17,6 +17,7 @@
 
 use nautilus_model::identifiers::{AccountId, TraderId};
 use pyo3::prelude::*;
+use rust_decimal::Decimal;
 
 use crate::config::{BetfairDataConfig, BetfairExecConfig};
 
@@ -55,6 +56,7 @@ impl BetfairDataConfig {
         stream_conflate_ms = None,
         subscription_delay_secs = None,
         subscribe_race_data = false,
+        subscribe_cricket_data = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
@@ -64,7 +66,7 @@ impl BetfairDataConfig {
         app_key: Option<String>,
         proxy_url: Option<String>,
         request_rate_per_second: u32,
-        default_min_notional: Option<f64>,
+        default_min_notional: Option<Decimal>,
         event_type_ids: Option<Vec<u64>>,
         event_type_names: Option<Vec<String>>,
         event_ids: Option<Vec<u64>>,
@@ -83,6 +85,7 @@ impl BetfairDataConfig {
         stream_conflate_ms: Option<u64>,
         subscription_delay_secs: Option<u64>,
         subscribe_race_data: bool,
+        subscribe_cricket_data: bool,
     ) -> Self {
         Self {
             account_currency: account_currency.unwrap_or_else(|| "GBP".to_string()),
@@ -110,6 +113,7 @@ impl BetfairDataConfig {
             stream_conflate_ms,
             subscription_delay_secs: subscription_delay_secs.unwrap_or(3),
             subscribe_race_data,
+            subscribe_cricket_data,
         }
     }
 

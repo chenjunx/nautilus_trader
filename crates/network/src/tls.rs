@@ -31,7 +31,7 @@ use tokio_tungstenite::{
 #[non_exhaustive]
 #[derive(Clone)]
 #[allow(dead_code)]
-pub enum Connector {
+pub(crate) enum Connector {
     /// No TLS connection.
     Plain,
     /// TLS connection using `rustls`.
@@ -40,7 +40,7 @@ pub enum Connector {
 
 mod encryption {
 
-    pub mod rustls {
+    pub(super) mod rustls {
         use std::{convert::TryFrom, sync::Arc};
 
         use nautilus_cryptography::tls::create_tls_config;
@@ -52,7 +52,7 @@ mod encryption {
             tungstenite::{Error, error::TlsError, stream::Mode},
         };
 
-        pub async fn wrap_stream<S>(
+        pub(crate) async fn wrap_stream<S>(
             socket: S,
             domain: String,
             mode: Mode,
@@ -83,7 +83,7 @@ mod encryption {
         }
     }
 
-    pub mod plain {
+    pub(super) mod plain {
         use tokio::io::{AsyncRead, AsyncWrite};
         use tokio_tungstenite::{
             MaybeTlsStream,
@@ -97,7 +97,10 @@ mod encryption {
             clippy::unused_async,
             reason = "signature mirrors the rustls variant which is genuinely async"
         )]
-        pub async fn wrap_stream<S>(socket: S, mode: Mode) -> Result<MaybeTlsStream<S>, Error>
+        pub(crate) async fn wrap_stream<S>(
+            socket: S,
+            mode: Mode,
+        ) -> Result<MaybeTlsStream<S>, Error>
         where
             S: 'static + AsyncRead + AsyncWrite + Send + Unpin,
         {
@@ -109,7 +112,7 @@ mod encryption {
     }
 }
 
-pub async fn tcp_tls<S>(
+pub(crate) async fn tcp_tls<S>(
     request: &Request,
     mode: Mode,
     stream: S,
@@ -149,7 +152,7 @@ fn domain(request: &Request) -> Result<String, Error> {
     }
 }
 
-pub fn create_tls_config_from_certs_dir(
+pub(crate) fn create_tls_config_from_certs_dir(
     certs_dir: &Path,
     require_client_auth: bool,
 ) -> anyhow::Result<rustls::ClientConfig> {
@@ -178,7 +181,8 @@ pub fn create_tls_config_from_certs_dir(
             && let Ok(key) = load_private_key(&path)
         {
             client_key = Some(key);
-            continue;
+            // No early continue: a combined PEM carries the certificate alongside
+            // the key, so this file is still scanned for certificates below.
         }
 
         if let Ok(certs) = load_certs(&path)
@@ -261,6 +265,12 @@ fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
         return Ok(key.into());
     }
 
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    if let Some(key) = rustls_pemfile::ec_private_keys(&mut reader).find_map(Result::ok) {
+        return Ok(key.into());
+    }
+
     anyhow::bail!("No valid private key found in {}", path.display());
 }
 
@@ -321,6 +331,49 @@ R/mOrHN4JnUw91q5QdKxbsHGHR+pFl662Yc7pewJ8FloxoFxD6igZG/1TdpdK4ii
 zhxL/14wqaVBwUW6/RNRr9hz6MkFFC8Uced5obScy8kOI0bMbeIC4ftNGG9pUdms
 3BSW8BRUdXasnBkWIg==
 -----END CERTIFICATE-----";
+
+    fn generate_client_key_and_cert() -> (String, String) {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        (key_pair.serialize_pem(), cert.pem())
+    }
+
+    #[rstest]
+    fn test_combined_key_and_cert_pem_enables_client_auth() {
+        // Regression: a combined PEM (key + certificate in one file) used to
+        // have its certificate skipped, silently dropping client auth
+        let (key_pem, cert_pem) = generate_client_key_and_cert();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let combined_path = temp_dir.path().join("client.pem");
+        std::fs::write(&combined_path, format!("{key_pem}{cert_pem}")).unwrap();
+
+        let result = create_tls_config_from_certs_dir(temp_dir.path(), true);
+
+        assert!(
+            result.is_ok(),
+            "Combined key+cert PEM should satisfy client auth: {:?}",
+            result.err()
+        );
+    }
+
+    #[rstest]
+    fn test_separate_key_and_cert_files_enable_client_auth() {
+        let (key_pem, cert_pem) = generate_client_key_and_cert();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("key.pem"), key_pem).unwrap();
+        std::fs::write(temp_dir.path().join("cert.pem"), cert_pem).unwrap();
+
+        let result = create_tls_config_from_certs_dir(temp_dir.path(), true);
+
+        assert!(
+            result.is_ok(),
+            "Separate key and cert files should satisfy client auth: {:?}",
+            result.err()
+        );
+    }
 
     #[rstest]
     fn test_ca_only_directory_succeeds() {

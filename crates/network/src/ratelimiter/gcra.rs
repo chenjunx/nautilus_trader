@@ -19,7 +19,7 @@ use super::{StateStore, clock, nanos::Nanos, quota::Quota};
 
 /// Information about the rate-limiting state used to reach a decision.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct StateSnapshot {
+pub(crate) struct StateSnapshot {
     /// The "weight" of a single packet in units of time.
     t: Nanos,
     /// The "burst capacity" of the bucket.
@@ -43,7 +43,7 @@ impl StateSnapshot {
     }
 
     /// Returns the quota used to make the rate limiting decision.
-    pub fn quota(&self) -> Quota {
+    pub(crate) fn quota(&self) -> Quota {
         Quota::from_gcra_parameters(self.t, self.tau)
     }
 
@@ -53,7 +53,7 @@ impl StateSnapshot {
     /// If this state snapshot is based on a negative rate limiting
     /// outcome, this method returns 0.
     #[allow(dead_code)]
-    pub fn remaining_burst_capacity(&self) -> u32 {
+    pub(crate) fn remaining_burst_capacity(&self) -> u32 {
         let t = self.t.as_u64();
         if t == 0 {
             return 0;
@@ -120,7 +120,7 @@ impl<P: clock::Reference> Display for NotUntil<P> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Gcra {
+pub(super) struct Gcra {
     /// The "weight" of a single packet in units of time.
     t: Nanos,
 
@@ -129,9 +129,20 @@ pub struct Gcra {
 }
 
 impl Gcra {
+    /// Creates a GCRA for `quota`.
+    ///
+    /// `t` and `tau` are clamped far below `u64::MAX` so TAT arithmetic
+    /// cannot saturate into the always-admit regime (`tat - tau` collapsing
+    /// to zero): a degenerate quota (period beyond ~146 years) admits its
+    /// burst and then denies. Unclamped, such quotas panicked in the
+    /// Duration multiplication.
     pub(crate) fn new(quota: Quota) -> Self {
-        let tau: Nanos = (quota.replenish_1_per * quota.max_burst.get()).into();
-        let t: Nanos = quota.replenish_1_per.into();
+        const MAX_QUOTA_NANOS: Nanos = Nanos::new(u64::MAX / 4);
+
+        let t = Nanos::from_duration_saturating(quota.replenish_1_per).min(MAX_QUOTA_NANOS);
+        let tau = t
+            .saturating_mul(u64::from(quota.max_burst.get()))
+            .min(MAX_QUOTA_NANOS);
         Self { t, tau }
     }
 

@@ -19,13 +19,10 @@
     clippy::manual_let_else,
     reason = "Prefer explicit control flow for error handling"
 )]
-use pyo3::{prelude::*, types::PyTuple};
+use pyo3::{Bound, prelude::*, types::PyTuple};
 
 /// Retrieves the Python interpreter version as a string.
 ///
-/// # Panics
-///
-/// Panics if `version_info` cannot be downcast to a tuple or if tuple elements are missing.
 #[must_use]
 pub fn get_python_version() -> String {
     Python::attach(|py| {
@@ -39,24 +36,25 @@ pub fn get_python_version() -> String {
             Err(_) => return "Unavailable (version_info not found)".to_string(),
         };
 
-        let version_tuple: &Bound<'_, PyTuple> = version_info
-            .cast::<PyTuple>()
-            .expect("Failed to extract version_info");
+        let version_tuple: &Bound<'_, PyTuple> = match version_info.cast::<PyTuple>() {
+            Ok(tuple) => tuple,
+            Err(_) => return "Unavailable (failed to extract version_info)".to_string(),
+        };
 
         let major = version_tuple
             .get_item(0)
-            .expect("Failed to get major version")
-            .extract::<i32>()
+            .ok()
+            .and_then(|item| item.extract::<i32>().ok())
             .unwrap_or(-1);
         let minor = version_tuple
             .get_item(1)
-            .expect("Failed to get minor version")
-            .extract::<i32>()
+            .ok()
+            .and_then(|item| item.extract::<i32>().ok())
             .unwrap_or(-1);
         let micro = version_tuple
             .get_item(2)
-            .expect("Failed to get micro version")
-            .extract::<i32>()
+            .ok()
+            .and_then(|item| item.extract::<i32>().ok())
             .unwrap_or(-1);
 
         if major == -1 || minor == -1 || micro == -1 {
@@ -75,7 +73,7 @@ pub fn get_python_version() -> String {
 /// `"Unavailable"` so that downstream code can distinguish *real* version strings from error
 /// cases.
 ///
-/// This helper is primarily intended for diagnostic/logging purposes inside the NautilusTrader
+/// This function is primarily intended for diagnostic/logging purposes inside the NautilusTrader
 /// Python bindings.
 pub fn get_python_package_version(package_name: &str) -> String {
     Python::attach(|py| match py.import(package_name) {
@@ -88,4 +86,72 @@ pub fn get_python_package_version(package_name: &str) -> String {
         },
         Err(_) => "Unavailable (failed to import package)".to_string(),
     })
+}
+
+/// Returns the `__version__` of a *Python* package, or `None` when it is not installed
+/// (or does not expose a usable `__version__`).
+///
+/// Unlike [`get_python_package_version`], this distinguishes "not installed" from a real
+/// version so callers can omit absent packages instead of logging an "Unavailable" line.
+#[must_use]
+pub fn get_python_package_version_opt(package_name: &str) -> Option<String> {
+    Python::attach(|py| {
+        let package = py.import(package_name).ok()?;
+        let version_attr = package.getattr("__version__").ok()?;
+        version_attr.extract::<String>().ok()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn test_get_python_version_handles_malformed_version_info() {
+        Python::initialize();
+        let version = Python::attach(|py| -> PyResult<String> {
+            let sys = py.import("sys")?;
+            let original = sys.getattr("version_info")?;
+            sys.setattr("version_info", "malformed")?;
+            let version = get_python_version();
+            sys.setattr("version_info", original)?;
+            Ok(version)
+        })
+        .expect("test Python setup should succeed");
+
+        assert_eq!(version, "Unavailable (failed to extract version_info)");
+    }
+
+    #[rstest]
+    fn test_get_python_package_version_opt_missing_returns_none() {
+        Python::initialize();
+        assert!(get_python_package_version_opt("nautilus_definitely_absent_pkg").is_none());
+    }
+
+    #[rstest]
+    fn test_get_python_package_version_opt_present_returns_some() {
+        Python::initialize();
+        let version = Python::attach(|py| {
+            let types = py.import("types").expect("import types");
+            let module = types
+                .call_method1("ModuleType", ("fake_pkg_xyz",))
+                .expect("create module");
+            module
+                .setattr("__version__", "9.9.9")
+                .expect("set __version__");
+            let modules = py
+                .import("sys")
+                .expect("import sys")
+                .getattr("modules")
+                .expect("sys.modules");
+            modules
+                .set_item("fake_pkg_xyz", &module)
+                .expect("register module");
+            get_python_package_version_opt("fake_pkg_xyz")
+        });
+
+        assert_eq!(version, Some("9.9.9".to_string()));
+    }
 }

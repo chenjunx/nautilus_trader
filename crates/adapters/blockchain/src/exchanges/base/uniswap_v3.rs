@@ -24,7 +24,7 @@ use crate::exchanges::{extended::DexExtended, parsing::uniswap_v3};
 
 /// Uniswap V3 DEX on Base.
 pub static UNISWAP_V3: LazyLock<DexExtended> = LazyLock::new(|| {
-    let dex = Dex::new(
+    let mut dex = Dex::new(
         chains::BASE.clone(),
         DexType::UniswapV3,
         "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
@@ -34,8 +34,12 @@ pub static UNISWAP_V3: LazyLock<DexExtended> = LazyLock::new(|| {
         "Swap(address,address,int256,int256,uint160,uint128,int24)",
         "Mint(address,address,int24,int24,uint128,uint256,uint256)",
         "Burn(address,int24,int24,uint128,uint256,uint256)",
-        "Collect(address,int24,int24,uint128,uint128)",
+        "Collect(address,address,int24,int24,uint128,uint128)",
     );
+    dex.set_initialize_event("Initialize(uint160,int24)");
+    dex.set_flash_event("Flash(address,address,uint256,uint256,uint256,uint256)");
+    dex.set_fee_protocol_update_event("SetFeeProtocol(uint8,uint8,uint8,uint8)");
+    dex.set_fee_protocol_collect_event("CollectProtocol(address,address,uint128,uint128)");
 
     let mut dex_extended = DexExtended::new(dex);
 
@@ -45,6 +49,34 @@ pub static UNISWAP_V3: LazyLock<DexExtended> = LazyLock::new(|| {
     );
     dex_extended.set_initialize_event_hypersync_parsing(
         uniswap_v3::initialize::parse_initialize_event_hypersync,
+    );
+    dex_extended.set_swap_event_hypersync_parsing(uniswap_v3::swap::parse_swap_event_hypersync);
+    dex_extended.set_mint_event_hypersync_parsing(uniswap_v3::mint::parse_mint_event_hypersync);
+    dex_extended.set_burn_event_hypersync_parsing(uniswap_v3::burn::parse_burn_event_hypersync);
+    dex_extended
+        .set_collect_event_hypersync_parsing(uniswap_v3::collect::parse_collect_event_hypersync);
+    dex_extended.set_flash_event_hypersync_parsing(uniswap_v3::flash::parse_flash_event_hypersync);
+    dex_extended.set_fee_protocol_update_event_hypersync_parsing(
+        uniswap_v3::fee_protocol_update::parse_fee_protocol_update_event_hypersync,
+    );
+    dex_extended.set_fee_protocol_collect_event_hypersync_parsing(
+        uniswap_v3::fee_protocol_collect::parse_fee_protocol_collect_event_hypersync,
+    );
+
+    dex_extended
+        .set_pool_created_event_rpc_parsing(uniswap_v3::pool_created::parse_pool_created_event_rpc);
+    dex_extended
+        .set_initialize_event_rpc_parsing(uniswap_v3::initialize::parse_initialize_event_rpc);
+    dex_extended.set_swap_event_rpc_parsing(uniswap_v3::swap::parse_swap_event_rpc);
+    dex_extended.set_mint_event_rpc_parsing(uniswap_v3::mint::parse_mint_event_rpc);
+    dex_extended.set_burn_event_rpc_parsing(uniswap_v3::burn::parse_burn_event_rpc);
+    dex_extended.set_collect_event_rpc_parsing(uniswap_v3::collect::parse_collect_event_rpc);
+    dex_extended.set_flash_event_rpc_parsing(uniswap_v3::flash::parse_flash_event_rpc);
+    dex_extended.set_fee_protocol_update_event_rpc_parsing(
+        uniswap_v3::fee_protocol_update::parse_fee_protocol_update_event_rpc,
+    );
+    dex_extended.set_fee_protocol_collect_event_rpc_parsing(
+        uniswap_v3::fee_protocol_collect::parse_fee_protocol_collect_event_rpc,
     );
 
     dex_extended

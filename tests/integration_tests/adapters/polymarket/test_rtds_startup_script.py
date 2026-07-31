@@ -23,5 +23,9 @@ def test_rtds_startup_script_configures_btcusd_and_data_output() -> None:
 
     assert 'POLYMARKET_RTDS_SYMBOLS="btcusd"' in content
     assert 'POLYMARKET_RTDS_OUTPUT_DIR="/home/admin/data/polymarket/rtds"' in content
+    assert 'POLYMARKET_RTDS_OUTPUT_FORMAT="parquet"' in content
+    assert 'POLYMARKET_RTDS_FLUSH_INTERVAL_SECS="5"' in content
+    assert 'POLYMARKET_RTDS_MAX_BUFFER_SIZE="1000"' in content
+    assert 'POLYMARKET_RTDS_STALE_TIMEOUT_SECS="60"' in content
     assert "polymarket_rtds_crypto_price_collector.py" in content
     assert "uv run --no-sync python" in content

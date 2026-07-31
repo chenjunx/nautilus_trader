@@ -876,7 +876,7 @@ class LiveExecutionEngine(ExecutionEngine):
         failed_venues: set[Venue | None] = set()
 
         for client, reports_or_exception in zip(clients, position_reports_all, strict=True):
-            if isinstance(reports_or_exception, Exception):
+            if isinstance(reports_or_exception, BaseException):
                 failed_venues.add(client.venue)
                 self._log.error(
                     f"Failed to generate position status reports for venue {client.venue}: "
@@ -1207,7 +1207,7 @@ class LiveExecutionEngine(ExecutionEngine):
         had_fill_query_errors = False
 
         for fills_or_exception in fill_reports_all:
-            if isinstance(fills_or_exception, Exception):
+            if isinstance(fills_or_exception, BaseException):
                 had_fill_query_errors = True
                 self._log.error(
                     f"Failed to generate fill reports for {instrument_id}: {fills_or_exception}",
@@ -1572,7 +1572,7 @@ class LiveExecutionEngine(ExecutionEngine):
         all_order_reports: list[OrderStatusReport] = []
 
         for reports_or_exception in order_reports_all:
-            if isinstance(reports_or_exception, Exception):
+            if isinstance(reports_or_exception, BaseException):
                 self._log.error(
                     f"Failed to generate order status reports: {reports_or_exception}",
                 )
@@ -1779,7 +1779,7 @@ class LiveExecutionEngine(ExecutionEngine):
                         *report_tasks,
                         return_exceptions=True,
                     ):
-                        if isinstance(task_result_or_exception, Exception):
+                        if isinstance(task_result_or_exception, BaseException):
                             self._log.error(
                                 f"Failed to generate position status reports: {task_result_or_exception}",
                             )
@@ -2230,6 +2230,15 @@ class LiveExecutionEngine(ExecutionEngine):
                 )
                 return False  # Failed
 
+        if report.client_order_id is not None and report.client_order_id != order.client_order_id:
+            self._log.warning(
+                f"Skipping fill reconciliation for {report.trade_id!r}: "
+                f"report.client_order_id={report.client_order_id!r} does not match "
+                f"order.client_order_id={order.client_order_id!r} resolved from "
+                f"venue_order_id={report.venue_order_id!r}",
+            )
+            return True  # Mismatched owner; skip without retry storm
+
         # Log external order processing for better visibility
         if order.strategy_id.value == "EXTERNAL":
             self._log.debug(
@@ -2472,6 +2481,13 @@ class LiveExecutionEngine(ExecutionEngine):
             instrument_id=report.instrument_id,
             account_id=report.account_id,
         )
+        split_ownership_message = self._netting_split_position_ownership_message(
+            report,
+            positions_open,
+        )
+
+        if split_ownership_message is not None:
+            self._log.warning(split_ownership_message, LogColor.YELLOW)
 
         position_signed_decimal_qty: Decimal = Decimal()
 
@@ -2588,6 +2604,28 @@ class LiveExecutionEngine(ExecutionEngine):
                     )
 
         return True  # Reconciled
+
+    def _netting_split_position_ownership_message(
+        self,
+        report: PositionStatusReport,
+        positions_open: list[Position],
+    ) -> str | None:
+        strategy_ids = sorted({position.strategy_id.value for position in positions_open})
+        if len(strategy_ids) <= 1:
+            return None
+
+        position_details = ", ".join(
+            f"{position.id}:strategy_id={position.strategy_id},"
+            f"signed_qty={position.signed_decimal_qty()}"
+            for position in sorted(positions_open, key=lambda pos: pos.id.value)
+        )
+        return (
+            f"NETTING position ownership is split for account_id={report.account_id}, "
+            f"instrument_id={report.instrument_id}: strategy_ids={strategy_ids}, "
+            f"positions=[{position_details}]. This is legal in Nautilus but dangerous on venues "
+            "with account-level net positions; use `external_order_claims` when one strategy "
+            "should claim reconciled exposure."
+        )
 
     def _reconcile_cross_zero_position(
         self,

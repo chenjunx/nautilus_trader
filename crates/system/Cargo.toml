@@ -34,8 +34,14 @@ python = [
 streaming = ["nautilus-persistence"]
 tracing-bridge = ["nautilus-common/tracing-bridge"]
 
+[package.metadata.cargo-machete]
+ignored = [
+  "nautilus-persistence",
+] # Optional dep activated only via the streaming feature
+
 [package.metadata.docs.rs]
-all-features = true
+# Python docs depend on the local pyo3-stub-gen patch for now, which published crates do not carry
+features = ["defi", "live", "streaming", "tracing-bridge"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -64,7 +70,6 @@ pyo3 = { workspace = true, optional = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
-rmp-serde = { workspace = true }
 rstest = { workspace = true }
-tempfile = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }

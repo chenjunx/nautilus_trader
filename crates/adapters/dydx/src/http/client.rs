@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Provides an ergonomic wrapper around the **dYdX v4 Indexer REST API** –
+//! Provides an ergonomic wrapper around the **dYdX v4 Indexer REST API**:
 //! <https://docs.dydx.xyz/api_integration-indexer/indexer_api>.
 //!
 //! This module exports two complementary HTTP clients following the standardized
@@ -54,10 +54,12 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     num::NonZeroU32,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex},
 };
 
+use ahash::AHashMap;
 use chrono::{DateTime, Utc};
+use nautilus_common::cache::InstrumentLookupError;
 use nautilus_core::{
     UnixNanos,
     consts::NAUTILUS_USER_AGENT,
@@ -80,12 +82,13 @@ use nautilus_model::{
 };
 use nautilus_network::{
     http::{HttpClient, Method, USER_AGENT},
-    ratelimiter::quota::Quota,
+    ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota},
     retry::{RetryConfig, RetryManager},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
+use ustr::Ustr;
 
 use super::error::DydxHttpError;
 use crate::{
@@ -128,12 +131,36 @@ fn bar_type_to_resolution(bar_type: &BarType) -> anyhow::Result<DydxCandleResolu
 
 /// Default dYdX Indexer REST API rate limit.
 ///
-/// The dYdX Indexer API rate limits are generous for read-only operations:
-/// - General: 100 requests per 10 seconds per IP
-/// - We use a conservative 10 requests per second as the default quota.
+/// The dYdX Indexer API rate limit is 100 requests per 10 seconds per IP.
+/// We use 9 req/s (vs the exact 10) to avoid edge-case 429s from
+/// GCRA vs server sliding-window misalignment at the boundary.
 pub static DYDX_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
-    Quota::per_second(NonZeroU32::new(10).expect("non-zero")).expect("valid constant")
+    Quota::per_second(NonZeroU32::new(9).expect("non-zero")).expect("valid constant")
 });
+
+type DydxRestRateLimiter = Arc<RateLimiter<Ustr, MonotonicClock>>;
+
+// Process-global registry of dYdX Indexer REST rate limiters, keyed by resolved base URL.
+// Clients on the same URL (a network's data and execution clients) share one 9 req/s bucket
+// matching the Indexer per-IP limit; distinct URLs (testnet, or a mock server in tests) stay
+// isolated so unrelated traffic never contends for the same tokens.
+static DYDX_REST_RATE_LIMITERS: LazyLock<Mutex<AHashMap<String, DydxRestRateLimiter>>> =
+    LazyLock::new(|| Mutex::new(AHashMap::new()));
+
+static DYDX_RATE_LIMIT_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("dydx:rest"));
+
+fn rate_limit_keys() -> Vec<Ustr> {
+    vec![*DYDX_RATE_LIMIT_KEY]
+}
+
+fn rest_rate_limiter(base_url: &str) -> DydxRestRateLimiter {
+    DYDX_REST_RATE_LIMITERS
+        .lock()
+        .expect("dYdX REST rate limiter registry mutex poisoned")
+        .entry(base_url.to_string())
+        .or_insert_with(|| Arc::new(RateLimiter::new_with_quota(Some(*DYDX_REST_QUOTA), vec![])))
+        .clone()
+}
 
 /// Represents a dYdX HTTP response wrapper.
 ///
@@ -214,13 +241,12 @@ impl DydxRawHttpClient {
         let mut headers = HashMap::new();
         headers.insert(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string());
 
-        let client = HttpClient::new(
+        let client = HttpClient::new_with_rate_limiter(
             headers,
-            vec![], // No specific headers to extract from responses
-            vec![], // No keyed quotas (we use a single global quota)
-            Some(*DYDX_REST_QUOTA),
+            vec![],
             Some(timeout_secs),
             proxy_url,
+            rest_rate_limiter(&base_url),
         )
         .map_err(|e| {
             DydxHttpError::ValidationError(format!("Failed to create HTTP client: {e}"))
@@ -279,11 +305,11 @@ impl DydxRawHttpClient {
                 .request_with_ustr_keys(
                     method.clone(),
                     url.clone(),
-                    None, // No params
-                    None, // No additional headers
-                    None, // No body for GET requests
-                    None, // Use default timeout
-                    None, // No specific rate limit keys (using global quota)
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(rate_limit_keys()),
                 )
                 .await
                 .map_err(|e| DydxHttpError::HttpClientError(e.to_string()))?;
@@ -371,11 +397,11 @@ impl DydxRawHttpClient {
                 .request_with_ustr_keys(
                     Method::POST,
                     url.clone(),
-                    None, // No params
-                    None, // No additional headers (content-type handled by body)
+                    None,
+                    None,
                     Some(body_bytes.clone()),
-                    None, // Use default timeout
-                    None, // No specific rate limit keys (using global quota)
+                    None,
+                    Some(rate_limit_keys()),
                 )
                 .await
                 .map_err(|e| DydxHttpError::HttpClientError(e.to_string()))?;
@@ -709,7 +735,7 @@ impl DydxRawHttpClient {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.dydx")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.dydx")
 )]
 pub struct DydxHttpClient {
     /// Raw HTTP client wrapped in Arc for efficient cloning.
@@ -851,7 +877,7 @@ impl DydxHttpClient {
         }
 
         if skipped_inactive > 0 {
-            log::info!(
+            log::debug!(
                 "Parsed {} instruments, skipped {} inactive",
                 instruments.len(),
                 skipped_inactive
@@ -917,9 +943,9 @@ impl DydxHttpClient {
         let count = items.len();
 
         if skipped_inactive > 0 {
-            log::info!("Cached {count} instruments, skipped {skipped_inactive} inactive");
+            log::debug!("Cached {count} instruments, skipped {skipped_inactive} inactive");
         } else {
-            log::info!("Cached {count} instruments");
+            log::debug!("Cached {count} instruments");
         }
 
         Ok(())
@@ -951,7 +977,7 @@ impl DydxHttpClient {
             self.instrument_cache
                 .insert(instrument.clone(), market.clone());
 
-            log::info!("Fetched and cached new instrument: {ticker}");
+            log::debug!("Fetched and cached new instrument: {ticker}");
             return Ok(Some(instrument));
         }
 
@@ -1084,7 +1110,7 @@ impl DydxHttpClient {
 
         let instrument = self
             .get_instrument(&instrument_id)
-            .ok_or_else(|| anyhow::anyhow!("Instrument not found in cache: {instrument_id}"))?;
+            .ok_or_else(|| InstrumentLookupError::not_found(instrument_id))?;
 
         let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
         let price_precision = instrument.price_precision();
@@ -1216,7 +1242,7 @@ impl DydxHttpClient {
 
         let instrument = self
             .get_instrument(&instrument_id)
-            .ok_or_else(|| anyhow::anyhow!("Instrument not found in cache: {instrument_id}"))?;
+            .ok_or_else(|| InstrumentLookupError::not_found(instrument_id))?;
 
         let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
         let price_precision = instrument.price_precision();
@@ -1379,7 +1405,7 @@ impl DydxHttpClient {
         // dYdX returns newest first; reverse to chronological order
         rates.reverse();
 
-        log::info!("Fetched {} funding rates for {instrument_id}", rates.len(),);
+        log::debug!("Fetched {} funding rates for {instrument_id}", rates.len(),);
 
         Ok(rates)
     }
@@ -1400,7 +1426,7 @@ impl DydxHttpClient {
     ) -> anyhow::Result<OrderBookDeltas> {
         let instrument = self
             .get_instrument(&instrument_id)
-            .ok_or_else(|| anyhow::anyhow!("Instrument not found in cache: {instrument_id}"))?;
+            .ok_or_else(|| InstrumentLookupError::not_found(instrument_id))?;
 
         let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
         let response = self.inner.get_orderbook(ticker).await?;
@@ -1793,6 +1819,18 @@ mod tests {
         let client = client.unwrap();
         assert!(client.is_testnet());
         assert_eq!(client.base_url(), DYDX_TESTNET_HTTP_URL);
+    }
+
+    #[rstest]
+    fn test_rest_rate_limiter_shared_per_base_url() {
+        let shared_a = rest_rate_limiter(DYDX_HTTP_URL);
+        let shared_b = rest_rate_limiter(DYDX_HTTP_URL);
+        let isolated = rest_rate_limiter("http://rate-limiter-test.invalid");
+
+        // Same base URL: data and execution clients on a network share one bucket.
+        assert!(Arc::ptr_eq(&shared_a, &shared_b));
+        // Distinct base URL: custom endpoints and mock servers stay isolated.
+        assert!(!Arc::ptr_eq(&shared_a, &isolated));
     }
 
     #[tokio::test]

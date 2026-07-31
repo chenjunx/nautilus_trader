@@ -35,8 +35,8 @@ use crate::{
     http::{
         error::{Error, Result},
         models::{
-            ClobBookResponse, FeeRateResponse, PolymarketOpenOrder, PolymarketOrder,
-            PolymarketTradeReport, TickSizeResponse,
+            ClobBookResponse, ClobMarketResponse, FeeRateResponse, PolymarketOpenOrder,
+            PolymarketOrder, PolymarketTradeReport, TickSizeResponse,
         },
         query::{
             BalanceAllowance, BatchCancelResponse, CancelMarketOrdersParams, CancelResponse,
@@ -500,6 +500,25 @@ impl PolymarketClobPublicClient {
         }
     }
 
+    /// Fetches a single market by condition ID from the CLOB API.
+    pub async fn get_market(&self, condition_id: &str) -> Result<ClobMarketResponse> {
+        let url = format!("{}/markets/{condition_id}", self.base_url);
+        let response = self
+            .client
+            .request_with_params(Method::GET, url, None::<&()>, None, None, None, None)
+            .await
+            .map_err(Error::from_http_client)?;
+
+        if response.status.is_success() {
+            serde_json::from_slice(&response.body).map_err(Error::Serde)
+        } else {
+            Err(Error::from_status_code(
+                response.status.as_u16(),
+                &response.body,
+            ))
+        }
+    }
+
     /// Requests an order book snapshot and builds an [`OrderBook`].
     pub async fn request_book_snapshot(
         &self,
@@ -530,7 +549,7 @@ impl PolymarketClobPublicClient {
             book.add(order, 0, (bids_len + i) as u64, Default::default());
         }
 
-        log::info!(
+        log::debug!(
             "Fetched order book for {} with {} bids and {} asks",
             instrument_id,
             resp.bids.len(),

@@ -20,12 +20,16 @@ from examples.live.polymarket.polymarket_rtds_crypto_price_collector import (
     build_subscription_message,
 )
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import extract_symbol
+from examples.live.polymarket.polymarket_rtds_crypto_price_collector import message_matches_symbols
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import output_path_for
+from examples.live.polymarket.polymarket_rtds_crypto_price_collector import parquet_path_for
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import parse_symbols
+from examples.live.polymarket.polymarket_rtds_crypto_price_collector import should_reconnect_for_stale_messages
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import (
     subscription_filter_for_symbol,
 )
 from examples.live.polymarket.polymarket_rtds_crypto_price_collector import write_message
+from examples.live.polymarket.polymarket_rtds_crypto_price_collector import write_parquet_messages
 
 
 def test_parse_symbols_defaults_to_btcusd() -> None:
@@ -37,25 +41,21 @@ def test_parse_symbols_normalizes_comma_separated_values() -> None:
     assert parse_symbols(" BTCUSD, ethusdt ,btc-usd ") == ["btcusd", "ethusdt", "btc-usd"]
 
 
-def test_subscription_filter_maps_btcusd_to_binance_btcusdt_json() -> None:
-    assert subscription_filter_for_symbol("btcusd") == json.dumps({"symbol": "btcusdt"})
+def test_subscription_filter_maps_symbols_to_chainlink_json() -> None:
+    assert subscription_filter_for_symbol("btcusd") == json.dumps({"symbol": "btc/usd"})
+    assert subscription_filter_for_symbol("ethusdt") == json.dumps({"symbol": "eth/usd"})
 
 
-def test_build_subscription_message_uses_crypto_prices_update_filters() -> None:
-    msg = build_subscription_message(["btcusd", "ethusdt"])
+def test_build_subscription_message_subscribes_to_full_chainlink_feed() -> None:
+    msg = build_subscription_message()
 
     assert msg == {
         "action": "subscribe",
         "subscriptions": [
             {
-                "topic": "crypto_prices",
-                "type": "update",
-                "filters": json.dumps({"symbol": "btcusdt"}),
-            },
-            {
-                "topic": "crypto_prices",
-                "type": "update",
-                "filters": json.dumps({"symbol": "ethusdt"}),
+                "topic": "crypto_prices_chainlink",
+                "type": "*",
+                "filters": "",
             },
         ],
     }
@@ -65,12 +65,34 @@ def test_extract_symbol_uses_symbol_field_when_present() -> None:
     assert extract_symbol({"symbol": "BTCUSD", "price": "100000"}, ["btcusd"]) == "btcusd"
 
 
+def test_extract_symbol_normalizes_chainlink_symbol_field() -> None:
+    assert extract_symbol({"symbol": "btc/usd", "price": "100000"}, ["btcusd"]) == "btcusd"
+
+
 def test_extract_symbol_falls_back_to_single_subscription() -> None:
     assert extract_symbol({"price": "100000"}, ["btcusd"]) == "btcusd"
 
 
 def test_extract_symbol_falls_back_to_unknown_for_ambiguous_messages() -> None:
     assert extract_symbol({"price": "100000"}, ["btcusd", "ethusdt"]) == "unknown"
+
+
+def test_message_matches_symbols_uses_nested_chainlink_payload_symbol() -> None:
+    assert message_matches_symbols({"payload": {"symbol": "btc/usd"}}, ["btcusd"])
+    assert not message_matches_symbols({"payload": {"symbol": "eth/usd"}}, ["btcusd"])
+
+
+def test_should_reconnect_for_stale_messages_after_timeout() -> None:
+    assert not should_reconnect_for_stale_messages(
+        last_msg_ns=1_000_000_000,
+        now_ns=59_999_999_999,
+        timeout_secs=60.0,
+    )
+    assert should_reconnect_for_stale_messages(
+        last_msg_ns=1_000_000_000,
+        now_ns=61_000_000_000,
+        timeout_secs=60.0,
+    )
 
 
 def test_output_path_partitions_by_topic_symbol_and_date(tmp_path: Path) -> None:
@@ -102,3 +124,104 @@ def test_write_message_appends_jsonl_with_receive_timestamp(tmp_path: Path) -> N
         "symbol": "btcusd",
         "raw": msg,
     }
+
+
+def test_parquet_path_partitions_by_symbol_and_date(tmp_path: Path) -> None:
+    path = parquet_path_for(
+        output_dir=tmp_path,
+        symbol="btcusd",
+        ts_recv_ns=1_787_817_600_000_000_000,
+    )
+
+    assert path.parent == tmp_path / "crypto_prices" / "btcusd" / "date=2026-08-27"
+    assert path.name == "1787817600000000000.parquet"
+
+
+def test_write_parquet_messages_flattens_chainlink_snapshot_rows(tmp_path: Path) -> None:
+    import pyarrow.parquet as pq
+
+    msg = {
+        "payload": {
+            "symbol": "btc/usd",
+            "data": [
+                {"timestamp": 1_787_817_599_000, "value": 99999.5},
+                {"timestamp": 1_787_817_600_000, "value": 100000.25},
+            ],
+        },
+        "timestamp": 1_787_817_600_123,
+        "topic": "crypto_prices_chainlink",
+        "type": "subscribe",
+    }
+
+    path = write_parquet_messages(
+        output_dir=tmp_path,
+        symbols=["btcusd"],
+        rows=[
+            {
+                "ts_recv_ns": 1_787_817_600_000_000_000,
+                "msg": msg,
+            },
+        ],
+    )
+
+    assert (
+        path
+        == tmp_path / "crypto_prices" / "btcusd" / "date=2026-08-27" / "1787817600000000000.parquet"
+    )
+    table = pq.read_table(path)
+    assert table.to_pylist() == [
+        {
+            "ts_recv_ns": 1_787_817_600_000_000_000,
+            "symbol": "btcusd",
+            "price_ts_ms": 1_787_817_599_000,
+            "price": "99999.5",
+            "raw_json": json.dumps(msg, separators=(",", ":"), ensure_ascii=False),
+            "date": "2026-08-27",
+        },
+        {
+            "ts_recv_ns": 1_787_817_600_000_000_000,
+            "symbol": "btcusd",
+            "price_ts_ms": 1_787_817_600_000,
+            "price": "100000.25",
+            "raw_json": json.dumps(msg, separators=(",", ":"), ensure_ascii=False),
+            "date": "2026-08-27",
+        },
+    ]
+
+
+def test_write_parquet_messages_filters_full_feed_to_configured_symbols(tmp_path: Path) -> None:
+    import pyarrow.parquet as pq
+
+    btc_msg = {
+        "payload": {"symbol": "btc/usd", "timestamp": 1_787_817_600_000, "value": 100000.25},
+        "timestamp": 1_787_817_600_123,
+        "topic": "crypto_prices_chainlink",
+        "type": "update",
+    }
+    eth_msg = {
+        "payload": {"symbol": "eth/usd", "timestamp": 1_787_817_600_000, "value": 4000.5},
+        "timestamp": 1_787_817_600_123,
+        "topic": "crypto_prices_chainlink",
+        "type": "update",
+    }
+
+    path = write_parquet_messages(
+        output_dir=tmp_path,
+        symbols=["btcusd"],
+        rows=[
+            {"ts_recv_ns": 1_787_817_600_000_000_000, "msg": btc_msg},
+            {"ts_recv_ns": 1_787_817_600_100_000_000, "msg": eth_msg},
+        ],
+    )
+
+    table = pq.read_table(path)
+    assert table.to_pylist() == [
+        {
+            "ts_recv_ns": 1_787_817_600_000_000_000,
+            "symbol": "btcusd",
+            "price_ts_ms": 1_787_817_600_000,
+            "price": "100000.25",
+            "raw_json": json.dumps(btc_msg, separators=(",", ":"), ensure_ascii=False),
+            "date": "2026-08-27",
+        },
+    ]

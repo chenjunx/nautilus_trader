@@ -84,6 +84,8 @@ API reference for field definitions rather than listing them again.
 - Use `✓` for supported features.
 - Use `-` for unsupported features (not `✗` or other symbols).
 - When adding notes for unsupported features, emphasize with italics: `*Not supported*`.
+- Make unsupported notes specific when the reason matters: use `*Not supported by <venue>*`
+  for venue gaps, or `*Not currently implemented*` for adapter gaps.
 - Leave cells empty when no content is needed.
 
 ## Code references
@@ -163,19 +165,40 @@ No imports are needed.
 
 ### Tabs
 
-Use `Tabs` and `Tab` for language-specific or variant code examples.
+Use tabs for language-specific or variant content. List Rust before Python so Rust is the
+default (left-most) tab.
+
+For code examples, add `tab="..."` to consecutive fenced code blocks:
 
 ```markdown
-<Tabs items={['Python', 'Rust']}>
-<Tab value="Python">
-\`\`\`python
-strategy.submit_order(order, params={"close_position": True})
-\`\`\`
-</Tab>
-<Tab value="Rust">
-\`\`\`rust
+\`\`\`rust tab="Rust"
 let params = Params::from([("close_position", true.into())]);
 \`\`\`
+
+\`\`\`python tab="Python"
+strategy.submit_order(order, params={"close_position": True})
+\`\`\`
+```
+
+For tables or other content, wrap each variant in `<Tabs>` and `<Tab>`. The instrument Fields
+tables use this so each language shows a single type column instead of side-by-side Rust and
+Python columns. Leave a blank line above and below the inner content so the Markdown renders.
+
+```markdown
+<Tabs items={["Rust", "Python"]}>
+<Tab value="Rust">
+
+| Field           | Type           | Required/default | Notes                   |
+|-----------------|----------------|------------------|-------------------------|
+| `instrument_id` | `InstrumentId` | Required         | Stored as `id` in Rust. |
+
+</Tab>
+<Tab value="Python">
+
+| Field           | Type           | Required/default | Notes |
+|-----------------|----------------|------------------|-------|
+| `instrument_id` | `InstrumentId` | Required         |       |
+
 </Tab>
 </Tabs>
 ```

@@ -14,6 +14,12 @@
 // -------------------------------------------------------------------------------------------------
 
 //! Example showing how to use the `GreeksCalculator` with a `DataActor`.
+//!
+//! Edit the constants below to change the trader, target instrument, and greeks underlying.
+//!
+//! Run with: `cargo run --example greeks_actor_example --package nautilus-common --features live`
+//!
+//! No credentials are required.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -21,7 +27,7 @@ use nautilus_common::{
     actor::data_actor::{DataActor, DataActorConfig, DataActorCore},
     cache::Cache,
     component::Component,
-    greeks::GreeksCalculator,
+    greeks::{GreeksCalculator, InstrumentGreeksParams, PortfolioGreeksParams},
     live::clock::LiveClock,
     nautilus_actor,
 };
@@ -34,122 +40,69 @@ use nautilus_model::{
     identifiers::{InstrumentId, TraderId},
 };
 
+const TRADER_ID: &str = "TRADER-001";
+const INSTRUMENT_ID: &str = "SPY.AMEX";
+const GREEKS_UNDERLYING: &str = "SPY";
+
 /// A custom actor that uses the `GreeksCalculator`.
 #[derive(Debug)]
 struct GreeksActor {
     core: DataActorCore,
-    greeks_calculator: GreeksCalculator,
+    greeks_calculator: Option<GreeksCalculator>,
 }
 
 impl GreeksActor {
     /// Creates a new [`GreeksActor`] instance.
-    pub fn new(
-        config: DataActorConfig,
-        cache: Rc<RefCell<Cache>>, // TODO: Change to standard registration pattern
-        clock: Rc<RefCell<LiveClock>>, // TODO: Change to standard registration pattern
-    ) -> Self {
+    pub(crate) fn new(config: DataActorConfig) -> Self {
         let core = DataActorCore::new(config);
-
-        // Create the GreeksCalculator with the same clock and cache
-        let greeks_calculator = GreeksCalculator::new(cache, clock);
 
         Self {
             core,
-            greeks_calculator,
+            greeks_calculator: None,
         }
     }
 
     /// Calculates greeks for a specific instrument.
-    pub fn calculate_instrument_greeks(
+    pub(crate) fn calculate_instrument_greeks(
         &self,
         instrument_id: InstrumentId,
     ) -> anyhow::Result<GreeksData> {
-        // Example parameters
-        let flat_interest_rate = 0.0425;
-        let flat_dividend_yield = None;
-        let spot_shock = 0.0;
-        let vol_shock = 0.0;
-        let time_to_expiry_shock = 0.0;
-        let use_cached_greeks = false;
-        let update_vol = false;
-        let cache_greeks = true;
-        let publish_greeks = true;
-        let ts_event = self.core.timestamp_ns();
-        let position = None;
-        let percent_greeks = false;
-        let index_instrument_id = None;
-        let beta_weights = None;
-
-        // Calculate greeks
-        self.greeks_calculator.instrument_greeks(
-            instrument_id,
-            Some(flat_interest_rate),
-            flat_dividend_yield,
-            Some(spot_shock),
-            Some(vol_shock),
-            Some(time_to_expiry_shock),
-            Some(use_cached_greeks),
-            Some(update_vol),
-            Some(cache_greeks),
-            Some(publish_greeks),
-            Some(ts_event),
-            position,
-            Some(percent_greeks),
-            index_instrument_id,
-            beta_weights,
-            None, // vega_time_weight_base
-        )
+        InstrumentGreeksParams::builder()
+            .instrument_id(instrument_id)
+            .cache_greeks(true)
+            .publish_greeks(true)
+            .ts_event(self.clock().timestamp_ns())
+            .build()
+            .calculate(self.calculator()?)
     }
 
     /// Calculates portfolio greeks.
-    pub fn calculate_portfolio_greeks(&self) -> anyhow::Result<PortfolioGreeks> {
-        // Example parameters
-        let underlyings = None;
-        let venue = None;
-        let instrument_id = None;
-        let strategy_id = None;
-        let side = Some(PositionSide::NoPositionSide);
-        let flat_interest_rate = 0.0425;
-        let flat_dividend_yield = None;
-        let spot_shock = 0.0;
-        let vol_shock = 0.0;
-        let time_to_expiry_shock = 0.0;
-        let use_cached_greeks = false;
-        let update_vol = false;
-        let cache_greeks = true;
-        let publish_greeks = true;
-        let percent_greeks = false;
-        let index_instrument_id = None;
-        let beta_weights = None;
-        let greeks_filter = None;
-
-        self.greeks_calculator.portfolio_greeks(
-            underlyings,
-            venue,
-            instrument_id,
-            strategy_id,
-            side,
-            Some(flat_interest_rate),
-            flat_dividend_yield,
-            Some(spot_shock),
-            Some(vol_shock),
-            Some(time_to_expiry_shock),
-            Some(use_cached_greeks),
-            Some(update_vol),
-            Some(cache_greeks),
-            Some(publish_greeks),
-            Some(percent_greeks),
-            index_instrument_id,
-            beta_weights,
-            greeks_filter,
-            None, // vega_time_weight_base
-        )
+    pub(crate) fn calculate_portfolio_greeks(&self) -> anyhow::Result<PortfolioGreeks> {
+        PortfolioGreeksParams::builder()
+            .side(PositionSide::NoPositionSide)
+            .cache_greeks(true)
+            .publish_greeks(true)
+            .build()
+            .calculate(self.calculator()?)
     }
 
     /// Subscribes to greeks data for a specific underlying.
-    pub fn subscribe_to_greeks(&self, underlying: &str) {
-        self.greeks_calculator
-            .subscribe_greeks::<fn(&GreeksData)>(underlying, None);
+    pub(crate) fn subscribe_to_greeks(&self, underlying: &str) -> anyhow::Result<()> {
+        self.calculator()?
+            .subscribe_greeks(underlying, Some(Self::handle_greeks as fn(&GreeksData)));
+        Ok(())
+    }
+
+    fn handle_greeks(greeks: &GreeksData) {
+        println!("Received greeks data: {greeks:?}");
+    }
+
+    fn calculator(&self) -> anyhow::Result<&GreeksCalculator> {
+        let Some(calculator) = &self.greeks_calculator else {
+            anyhow::bail!("GreeksActor must be started before calculating greeks");
+        };
+
+        Ok(calculator)
     }
 }
 
@@ -157,15 +110,16 @@ nautilus_actor!(GreeksActor);
 
 impl DataActor for GreeksActor {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        self.subscribe_to_greeks("SPY");
-        Ok(())
+        self.greeks_calculator = Some(GreeksCalculator::from_actor(self));
+        self.subscribe_to_greeks(GREEKS_UNDERLYING)
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn on_data(&mut self, _data: &CustomData) -> anyhow::Result<()> {
+    fn on_data(&mut self, data: &CustomData) -> anyhow::Result<()> {
+        println!("Received custom data: {}", data.data_type);
         Ok(())
     }
 }
@@ -178,17 +132,17 @@ fn main() -> anyhow::Result<()> {
     // Create actor config
     let config = DataActorConfig::default();
 
-    let trader_id = TraderId::from("TRADER-001");
+    let trader_id = TraderId::from(TRADER_ID);
 
     // Create the GreeksActor
-    let mut actor = GreeksActor::new(config, cache.clone(), clock.clone()); // TODO: Change to registration pattern
+    let mut actor = GreeksActor::new(config);
     actor.register(trader_id, clock, cache).unwrap();
 
     // Start the actor
     actor.start()?;
 
     // Example: Calculate greeks for an instrument
-    let instrument_id = InstrumentId::from("SPY.AMEX");
+    let instrument_id = InstrumentId::from(INSTRUMENT_ID);
     match actor.calculate_instrument_greeks(instrument_id) {
         Ok(greeks) => println!("Calculated greeks for {instrument_id}: {greeks:?}"),
         Err(e) => println!("Error calculating greeks: {e}"),

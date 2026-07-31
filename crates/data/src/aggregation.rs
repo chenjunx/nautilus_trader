@@ -95,7 +95,7 @@ pub trait BarAggregator: Any + Debug {
     fn update_bar(&mut self, bar: Bar, volume: Quantity, ts_init: UnixNanos);
     /// Stop the aggregator, e.g., cancel timers. Default is no-op.
     fn stop(&mut self) {}
-    /// Sets historical mode (default implementation does nothing, `TimeBarAggregator` overrides)
+    /// Sets historical mode and the handler used for completed bars.
     fn set_historical_mode(&mut self, _historical_mode: bool, _handler: Box<dyn FnMut(Bar)>) {}
     /// Sets historical events (default implementation does nothing, `TimeBarAggregator` overrides)
     fn set_historical_events(&mut self, _events: Vec<TimeEvent>) {}
@@ -110,6 +110,8 @@ pub trait BarAggregator: Any + Debug {
     /// Sets the weak reference to the aggregator wrapper (for historical mode).
     /// Default implementation does nothing, `TimeBarAggregator` overrides.
     fn set_aggregator_weak(&mut self, _weak: Weak<RefCell<Box<dyn BarAggregator>>>) {}
+    /// Configures the continuous-future price adjustment for the underlying builder.
+    fn set_adjustment(&mut self, _adjustment: Decimal, _mode: ContinuousFutureAdjustmentType) {}
 }
 
 impl dyn BarAggregator {
@@ -409,6 +411,11 @@ impl BarAggregatorCore {
     pub const fn set_is_running(&mut self, value: bool) {
         self.is_running = value;
     }
+
+    fn set_handler(&mut self, handler: BarHandler) {
+        self.handler = handler;
+    }
+
     fn apply_update(&mut self, price: Price, size: Quantity, ts_init: UnixNanos) {
         self.builder.update(price, size, ts_init);
     }
@@ -422,6 +429,26 @@ impl BarAggregatorCore {
         let bar = self.builder.build(ts_event, ts_init);
         (self.handler)(bar);
     }
+
+    fn set_adjustment(&mut self, adjustment: Decimal, mode: ContinuousFutureAdjustmentType) {
+        self.builder.set_adjustment(adjustment, mode);
+    }
+}
+
+macro_rules! impl_set_historical_handler {
+    () => {
+        fn set_historical_mode(&mut self, _historical_mode: bool, handler: Box<dyn FnMut(Bar)>) {
+            self.core.set_handler(handler);
+        }
+    };
+}
+
+macro_rules! impl_set_adjustment {
+    () => {
+        fn set_adjustment(&mut self, adjustment: Decimal, mode: ContinuousFutureAdjustmentType) {
+            self.core.set_adjustment(adjustment, mode);
+        }
+    };
 }
 
 /// Provides a means of building tick bars aggregated from quote and trades.
@@ -470,6 +497,9 @@ impl BarAggregator for TickBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     fn update(&mut self, price: Price, size: Quantity, ts_init: UnixNanos) {
@@ -540,6 +570,9 @@ impl BarAggregator for TickImbalanceBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     ///
@@ -625,6 +658,9 @@ impl BarAggregator for TickRunsBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     ///
@@ -717,6 +753,9 @@ impl BarAggregator for VolumeBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     fn update(&mut self, price: Price, size: Quantity, ts_init: UnixNanos) {
@@ -830,6 +869,9 @@ impl BarAggregator for VolumeImbalanceBarAggregator {
         self.core.set_is_running(value);
     }
 
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
+
     /// Apply the given update to the aggregator.
     ///
     /// Note: side-aware logic lives in `handle_trade`. This method is used for
@@ -932,6 +974,9 @@ impl BarAggregator for VolumeRunsBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     ///
@@ -1047,6 +1092,9 @@ impl BarAggregator for ValueBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     fn update(&mut self, price: Price, size: Quantity, ts_init: UnixNanos) {
@@ -1192,6 +1240,9 @@ impl BarAggregator for ValueImbalanceBarAggregator {
         self.core.set_is_running(value);
     }
 
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
+
     /// Apply the given update to the aggregator.
     ///
     /// Note: side-aware logic lives in `handle_trade`. This method is used for
@@ -1222,7 +1273,7 @@ impl BarAggregator for ValueImbalanceBarAggregator {
         while size_remaining > 0.0 {
             let value_remaining = price_f64 * size_remaining;
 
-            #[allow(clippy::float_cmp, reason = "exact-zero check on accumulator")]
+            #[expect(clippy::float_cmp, reason = "exact-zero check on accumulator")]
             if self.imbalance_value == 0.0 || self.imbalance_value.signum() == side_sign {
                 let needed = self.step_value - self.imbalance_value.abs();
                 if value_remaining <= needed {
@@ -1357,6 +1408,9 @@ impl BarAggregator for ValueRunsBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     ///
@@ -1496,6 +1550,9 @@ impl BarAggregator for RenkoBarAggregator {
     fn set_is_running(&mut self, value: bool) {
         self.core.set_is_running(value);
     }
+
+    impl_set_historical_handler!();
+    impl_set_adjustment!();
 
     /// Apply the given update to the aggregator.
     ///
@@ -2022,6 +2079,10 @@ impl BarAggregator for TimeBarAggregator {
     fn start_timer(&mut self, aggregator_rc: Option<Rc<RefCell<Box<dyn BarAggregator>>>>) {
         self.start_timer_internal(aggregator_rc);
     }
+
+    fn set_adjustment(&mut self, adjustment: Decimal, mode: ContinuousFutureAdjustmentType) {
+        self.core.set_adjustment(adjustment, mode);
+    }
 }
 
 fn is_below_min_size(size: f64, precision: u8) -> bool {
@@ -2148,8 +2209,12 @@ pub struct SpreadQuoteAggregator {
     quote_build_delay: u64,
     has_update: bool,
     timer_name: String,
+    vega_pricing_timeout_timer_name: String,
     historical_event_at_ts_init: Option<TimeEvent>,
     vega_provider: Option<Box<dyn VegaProvider>>,
+    disable_vega_pricing: bool,
+    vega_pricing_temporarily_disabled: bool,
+    vega_pricing_timeout_seconds: u64,
     price_rounder: Option<Box<dyn SpreadPriceRounder>>,
     is_running: bool,
     aggregator_weak: Option<Weak<RefCell<Self>>>,
@@ -2184,6 +2249,8 @@ impl SpreadQuoteAggregator {
         historical_mode: bool,
         update_interval_seconds: Option<u64>,
         quote_build_delay: u64,
+        disable_vega_pricing: bool,
+        vega_pricing_timeout_seconds: u64,
         vega_provider: Option<Box<dyn VegaProvider>>,
         price_rounder: Option<Box<dyn SpreadPriceRounder>>,
     ) -> Self {
@@ -2195,6 +2262,8 @@ impl SpreadQuoteAggregator {
             assert!(r != 0, "Ratio cannot be zero");
         }
         let timer_name = format!("SPREAD_QUOTE_{spread_instrument_id}");
+        let vega_pricing_timeout_timer_name =
+            format!("VEGA_PRICING_TIMEOUT_{spread_instrument_id}");
         Self {
             spread_instrument_id,
             leg_ids,
@@ -2218,8 +2287,12 @@ impl SpreadQuoteAggregator {
             quote_build_delay,
             has_update: false,
             timer_name,
+            vega_pricing_timeout_timer_name,
             historical_event_at_ts_init: None,
             vega_provider,
+            disable_vega_pricing,
+            vega_pricing_temporarily_disabled: false,
+            vega_pricing_timeout_seconds,
             price_rounder,
             is_running: false,
             aggregator_weak: None,
@@ -2272,20 +2345,18 @@ impl SpreadQuoteAggregator {
     ///
     /// Panics if called with `None` in timer mode without a prior [`Self::prepare_for_timer_mode`] call.
     pub fn start_timer(&mut self, aggregator_rc: Option<Rc<RefCell<Self>>>) {
+        if let Some(rc) = aggregator_rc {
+            self.aggregator_weak = Some(Rc::downgrade(&rc));
+        }
+
         let Some(interval_secs) = self.update_interval_seconds else {
             return;
         };
-        let aggregator_weak = if let Some(rc) = aggregator_rc {
-            let weak = Rc::downgrade(&rc);
-            self.aggregator_weak = Some(weak.clone());
-            weak
-        } else {
-            self.aggregator_weak.clone().expect(
-                "SpreadQuoteAggregator: timer mode requires prepare_for_timer_mode(rc) to be \
+        let aggregator_weak = self.aggregator_weak.clone().expect(
+            "SpreadQuoteAggregator: timer mode requires prepare_for_timer_mode(rc) to be \
                  called first with the Rc that wraps this aggregator (before feeding quotes in \
                  historical mode or before start_timer(None)).",
-            )
-        };
+        );
 
         let callback = TimeEventCallback::RustLocal(Rc::new(move |event: TimeEvent| {
             if let Some(agg) = aggregator_weak.upgrade() {
@@ -2322,17 +2393,25 @@ impl SpreadQuoteAggregator {
 
     /// Stops the timer when in timer-driven mode.
     pub fn stop_timer(&mut self) {
-        if self.update_interval_seconds.is_none() {
-            return;
+        if self.update_interval_seconds.is_some()
+            && self
+                .clock
+                .borrow()
+                .timer_names()
+                .contains(&self.timer_name.as_str())
+        {
+            self.clock.borrow_mut().cancel_timer(&self.timer_name);
         }
 
         if self
             .clock
             .borrow()
             .timer_names()
-            .contains(&self.timer_name.as_str())
+            .contains(&self.vega_pricing_timeout_timer_name.as_str())
         {
-            self.clock.borrow_mut().cancel_timer(&self.timer_name);
+            self.clock
+                .borrow_mut()
+                .cancel_timer(&self.vega_pricing_timeout_timer_name);
         }
     }
 
@@ -2420,6 +2499,9 @@ impl SpreadQuoteAggregator {
             return;
         }
 
+        let use_vega_pricing =
+            !(self.disable_vega_pricing || self.vega_pricing_temporarily_disabled);
+
         for (idx, &leg_id) in self.leg_ids.iter().enumerate() {
             let Some(tick) = self.last_quotes.get(&leg_id) else {
                 log::error!(
@@ -2437,10 +2519,11 @@ impl SpreadQuoteAggregator {
             self.ask_sizes[idx] = tick.ask_size.as_f64();
 
             if !self.is_futures_spread {
-                self.mid_prices[idx] = (ask_price + bid_price) * 0.5;
+                self.mid_prices[idx] = f64::midpoint(ask_price, bid_price);
                 self.bid_ask_spreads[idx] = ask_price - bid_price;
 
-                if let Some(ref vp) = self.vega_provider
+                if use_vega_pricing
+                    && let Some(ref vp) = self.vega_provider
                     && let Some(vega) = vp.vega_for_leg(leg_id)
                 {
                     self.vegas[idx] = vega;
@@ -2457,7 +2540,11 @@ impl SpreadQuoteAggregator {
         (self.handler)(spread_quote);
     }
 
-    fn create_option_spread_prices(&self) -> (f64, f64) {
+    fn create_option_spread_prices(&mut self) -> (f64, f64) {
+        if self.disable_vega_pricing || self.vega_pricing_temporarily_disabled {
+            return self.create_futures_spread_prices();
+        }
+
         let vega_multipliers: Vec<f64> = (0..self.n_legs)
             .map(|i| {
                 if self.vegas[i] == 0.0 {
@@ -2475,9 +2562,11 @@ impl SpreadQuoteAggregator {
 
         if non_zero.is_empty() {
             log::warn!(
-                "No vega information available for the components of {}. Will generate spread quote using component quotes only",
-                self.spread_instrument_id
+                "No vega information available for the components of {}; will generate spread quote using component quotes only, vega pricing is disabled for {} seconds, subscribe to some underlying price information for more precise quotes",
+                self.spread_instrument_id,
+                self.vega_pricing_timeout_seconds
             );
+            self.start_vega_pricing_timeout();
             return self.create_futures_spread_prices();
         }
         let vega_multiplier = non_zero.iter().map(|x| x.abs()).sum::<f64>() / non_zero.len() as f64;
@@ -2498,6 +2587,44 @@ impl SpreadQuoteAggregator {
         let raw_bid = spread_mid_price - bid_ask_spread * 0.5;
         let raw_ask = spread_mid_price + bid_ask_spread * 0.5;
         (raw_bid, raw_ask)
+    }
+
+    fn clear_vega_pricing_timeout(&mut self) {
+        self.vega_pricing_temporarily_disabled = false;
+    }
+
+    fn start_vega_pricing_timeout(&mut self) {
+        self.vega_pricing_temporarily_disabled = true;
+
+        if self
+            .clock
+            .borrow()
+            .timer_names()
+            .contains(&self.vega_pricing_timeout_timer_name.as_str())
+        {
+            return;
+        }
+
+        let Some(aggregator_weak) = self.aggregator_weak.clone() else {
+            return;
+        };
+        let callback = TimeEventCallback::RustLocal(Rc::new(move |_event: TimeEvent| {
+            if let Some(agg) = aggregator_weak.upgrade() {
+                agg.borrow_mut().clear_vega_pricing_timeout();
+            }
+        }));
+        let alert_time =
+            self.clock.borrow().timestamp_ns() + self.vega_pricing_timeout_seconds * 1_000_000_000;
+
+        self.clock
+            .borrow_mut()
+            .set_time_alert_ns(
+                &self.vega_pricing_timeout_timer_name,
+                alert_time,
+                Some(callback),
+                Some(true),
+            )
+            .expect("Failed to set spread quote vega pricing timeout");
     }
 
     fn create_futures_spread_prices(&self) -> (f64, f64) {
@@ -3411,6 +3538,252 @@ mod tests {
         assert_eq!(bar2.open, Price::from("1.00003"));
         assert_eq!(bar2.close, Price::from("1.00004"));
         assert_eq!(bar2.volume, Quantity::from(2));
+    }
+
+    #[rstest]
+    fn test_non_time_bar_aggregators_use_historical_handler(
+        equity_aapl: Equity,
+        audusd_sim: CurrencyPair,
+    ) {
+        let instrument = InstrumentAny::Equity(equity_aapl);
+        let instrument_id = instrument.id();
+        let price_precision = instrument.price_precision();
+        let size_precision = instrument.size_precision();
+        let make_sink = |bars: Arc<Mutex<Vec<Bar>>>| {
+            move |bar: Bar| {
+                bars.lock().expect(MUTEX_POISONED).push(bar);
+            }
+        };
+        let make_trade = |price: &str, size: i64, ts: u64| TradeTick {
+            instrument_id,
+            price: Price::from(price),
+            size: Quantity::from(size),
+            aggressor_side: AggressorSide::Buyer,
+            ts_event: UnixNanos::from(ts),
+            ts_init: UnixNanos::from(ts),
+            ..TradeTick::default()
+        };
+
+        macro_rules! assert_historical_sink_receives {
+            ($name:expr, $aggregator:expr, $update:expr) => {{
+                let initial_bars = Arc::new(Mutex::new(Vec::new()));
+                let historical_bars = Arc::new(Mutex::new(Vec::new()));
+                let mut aggregator = $aggregator(Arc::clone(&initial_bars));
+                aggregator
+                    .set_historical_mode(true, Box::new(make_sink(Arc::clone(&historical_bars))));
+                {
+                    let aggregator: &mut dyn BarAggregator = &mut aggregator;
+                    $update(aggregator);
+                }
+
+                assert_eq!(
+                    initial_bars.lock().expect(MUTEX_POISONED).len(),
+                    0,
+                    "{}",
+                    $name,
+                );
+                assert_eq!(
+                    historical_bars.lock().expect(MUTEX_POISONED).len(),
+                    1,
+                    "{}",
+                    $name,
+                );
+            }};
+        }
+
+        let tick_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(1, BarAggregation::Tick, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "TickBarAggregator",
+            |bars| TickBarAggregator::new(
+                tick_type,
+                price_precision,
+                size_precision,
+                make_sink(bars)
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let tick_imbalance_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(1, BarAggregation::TickImbalance, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "TickImbalanceBarAggregator",
+            |bars| TickImbalanceBarAggregator::new(
+                tick_imbalance_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let tick_runs_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(1, BarAggregation::TickRuns, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "TickRunsBarAggregator",
+            |bars| TickRunsBarAggregator::new(
+                tick_runs_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let volume_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(1, BarAggregation::Volume, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "VolumeBarAggregator",
+            |bars| VolumeBarAggregator::new(
+                volume_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let volume_imbalance_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(1, BarAggregation::VolumeImbalance, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "VolumeImbalanceBarAggregator",
+            |bars| VolumeImbalanceBarAggregator::new(
+                volume_imbalance_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let volume_runs_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(1, BarAggregation::VolumeRuns, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "VolumeRunsBarAggregator",
+            |bars| VolumeRunsBarAggregator::new(
+                volume_runs_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let value_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(100, BarAggregation::Value, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "ValueBarAggregator",
+            |bars| ValueBarAggregator::new(
+                value_type,
+                price_precision,
+                size_precision,
+                make_sink(bars)
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let value_imbalance_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(100, BarAggregation::ValueImbalance, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "ValueImbalanceBarAggregator",
+            |bars| ValueImbalanceBarAggregator::new(
+                value_imbalance_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let value_runs_type = BarType::new(
+            instrument_id,
+            BarSpecification::new(100, BarAggregation::ValueRuns, PriceType::Last),
+            AggregationSource::Internal,
+        );
+        assert_historical_sink_receives!(
+            "ValueRunsBarAggregator",
+            |bars| ValueRunsBarAggregator::new(
+                value_runs_type,
+                price_precision,
+                size_precision,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.handle_trade(make_trade("100.00", 1, 1_000));
+            }
+        );
+
+        let fx = InstrumentAny::CurrencyPair(audusd_sim);
+        let renko_type = BarType::new(
+            fx.id(),
+            BarSpecification::new(10, BarAggregation::Renko, PriceType::Mid),
+            AggregationSource::Internal,
+        );
+        let fx_price_precision = fx.price_precision();
+        let fx_size_precision = fx.size_precision();
+        let fx_price_increment = fx.price_increment();
+        assert_historical_sink_receives!(
+            "RenkoBarAggregator",
+            |bars| RenkoBarAggregator::new(
+                renko_type,
+                fx_price_precision,
+                fx_size_precision,
+                fx_price_increment,
+                make_sink(bars),
+            ),
+            |aggregator: &mut dyn BarAggregator| {
+                aggregator.update(
+                    Price::from("1.00000"),
+                    Quantity::from(1),
+                    UnixNanos::from(1_000),
+                );
+                aggregator.update(
+                    Price::from("1.00010"),
+                    Quantity::from(1),
+                    UnixNanos::from(2_000),
+                );
+            }
+        );
     }
 
     #[rstest]
@@ -5796,6 +6169,8 @@ mod tests {
             false,
             None,
             0,
+            false,
+            60,
             None,
             None,
         );
@@ -5851,6 +6226,8 @@ mod tests {
             false,
             None,
             0,
+            false,
+            60,
             None,
             None,
         );
@@ -5906,6 +6283,8 @@ mod tests {
             false,
             None,
             0,
+            false,
+            60,
             None,
             None,
         );
@@ -5961,6 +6340,8 @@ mod tests {
             false,
             Some(1),
             0,
+            false,
+            60,
             None,
             None,
         );
@@ -6038,6 +6419,8 @@ mod tests {
             true,
             Some(1),
             0,
+            false,
+            60,
             None,
             None,
         );
@@ -6112,6 +6495,8 @@ mod tests {
             true,
             Some(1),
             0,
+            false,
+            60,
             None,
             None,
         );
@@ -6181,6 +6566,8 @@ mod tests {
             false,
             None,
             0,
+            false,
+            60,
             Some(Box::new(vega_provider)),
             None,
         );
@@ -6226,7 +6613,7 @@ mod tests {
         vega_provider.insert(leg1, 0.0);
         vega_provider.insert(leg2, 0.0);
 
-        let mut agg = SpreadQuoteAggregator::new(
+        let agg = SpreadQuoteAggregator::new(
             spread_id,
             &legs,
             false,
@@ -6235,16 +6622,20 @@ mod tests {
             Box::new(move |q: QuoteTick| {
                 handler_clone.lock().expect(MUTEX_POISONED).push(q);
             }),
-            clock,
+            clock.clone(),
             false,
             None,
             0,
+            false,
+            1,
             Some(Box::new(vega_provider)),
             None,
         );
+        let rc = Rc::new(RefCell::new(agg));
+        rc.borrow_mut().start_timer(Some(Rc::clone(&rc)));
 
         let ts = UnixNanos::from(1_000_000_000);
-        agg.handle_quote_tick(QuoteTick::new(
+        rc.borrow_mut().handle_quote_tick(QuoteTick::new(
             leg1,
             Price::from("10.00"),
             Price::from("10.10"),
@@ -6253,7 +6644,7 @@ mod tests {
             ts,
             ts,
         ));
-        agg.handle_quote_tick(QuoteTick::new(
+        rc.borrow_mut().handle_quote_tick(QuoteTick::new(
             leg2,
             Price::from("20.00"),
             Price::from("20.10"),
@@ -6262,11 +6653,144 @@ mod tests {
             ts,
             ts,
         ));
-        let quotes = handler.lock().expect(MUTEX_POISONED);
-        assert_eq!(quotes.len(), 1);
-        let q = &quotes[0];
-        assert_eq!(q.bid_price, Price::from("-10.10"));
-        assert_eq!(q.ask_price, Price::from("-9.90"));
+        {
+            let quotes = handler.lock().expect(MUTEX_POISONED);
+            assert_eq!(quotes.len(), 1);
+            let q = &quotes[0];
+            assert_eq!(q.bid_price, Price::from("-10.10"));
+            assert_eq!(q.ask_price, Price::from("-9.90"));
+        }
+        assert!(rc.borrow().vega_pricing_temporarily_disabled);
+
+        let timeout_name = rc.borrow().vega_pricing_timeout_timer_name.clone();
+        assert!(
+            clock
+                .borrow()
+                .timer_names()
+                .contains(&timeout_name.as_str())
+        );
+
+        let events = clock
+            .borrow_mut()
+            .advance_time(UnixNanos::from(2_000_000_000), true);
+
+        for handler in clock.borrow().match_handlers(events) {
+            handler.run();
+        }
+
+        assert!(!rc.borrow().vega_pricing_temporarily_disabled);
+
+        let cancel_handler = Arc::new(Mutex::new(Vec::new()));
+        let cancel_handler_clone = Arc::clone(&cancel_handler);
+        let mut cancel_vega_provider = MapVegaProvider::new();
+        cancel_vega_provider.insert(leg1, 0.0);
+        cancel_vega_provider.insert(leg2, 0.0);
+        let cancel_agg = SpreadQuoteAggregator::new(
+            spread_id,
+            &legs,
+            false,
+            instrument.price_precision(),
+            0,
+            Box::new(move |q: QuoteTick| {
+                cancel_handler_clone.lock().expect(MUTEX_POISONED).push(q);
+            }),
+            clock.clone(),
+            false,
+            None,
+            0,
+            false,
+            10,
+            Some(Box::new(cancel_vega_provider)),
+            None,
+        );
+        let cancel_rc = Rc::new(RefCell::new(cancel_agg));
+        cancel_rc
+            .borrow_mut()
+            .start_timer(Some(Rc::clone(&cancel_rc)));
+        cancel_rc.borrow_mut().handle_quote_tick(QuoteTick::new(
+            leg1,
+            Price::from("10.00"),
+            Price::from("10.10"),
+            Quantity::from(100),
+            Quantity::from(100),
+            ts,
+            ts,
+        ));
+        cancel_rc.borrow_mut().handle_quote_tick(QuoteTick::new(
+            leg2,
+            Price::from("20.00"),
+            Price::from("20.10"),
+            Quantity::from(100),
+            Quantity::from(100),
+            ts,
+            ts,
+        ));
+        let cancel_timeout_name = cancel_rc.borrow().vega_pricing_timeout_timer_name.clone();
+        assert!(
+            clock
+                .borrow()
+                .timer_names()
+                .contains(&cancel_timeout_name.as_str())
+        );
+        cancel_rc.borrow_mut().stop_timer();
+        assert!(
+            !clock
+                .borrow()
+                .timer_names()
+                .contains(&cancel_timeout_name.as_str())
+        );
+
+        let permanent_handler = Arc::new(Mutex::new(Vec::new()));
+        let permanent_handler_clone = Arc::clone(&permanent_handler);
+        let mut permanent_vega_provider = MapVegaProvider::new();
+        permanent_vega_provider.insert(leg1, 0.15);
+        permanent_vega_provider.insert(leg2, 0.12);
+        let mut permanent_agg = SpreadQuoteAggregator::new(
+            spread_id,
+            &legs,
+            false,
+            instrument.price_precision(),
+            0,
+            Box::new(move |q: QuoteTick| {
+                permanent_handler_clone
+                    .lock()
+                    .expect(MUTEX_POISONED)
+                    .push(q);
+            }),
+            Rc::new(RefCell::new(TestClock::new())),
+            false,
+            None,
+            0,
+            true,
+            1,
+            Some(Box::new(permanent_vega_provider)),
+            None,
+        );
+
+        permanent_agg.handle_quote_tick(QuoteTick::new(
+            leg1,
+            Price::from("10.00"),
+            Price::from("10.10"),
+            Quantity::from(100),
+            Quantity::from(100),
+            ts,
+            ts,
+        ));
+        permanent_agg.handle_quote_tick(QuoteTick::new(
+            leg2,
+            Price::from("20.00"),
+            Price::from("20.10"),
+            Quantity::from(100),
+            Quantity::from(100),
+            ts,
+            ts,
+        ));
+
+        let permanent_quotes = permanent_handler.lock().expect(MUTEX_POISONED);
+        assert_eq!(permanent_quotes.len(), 1);
+        assert_eq!(permanent_quotes[0].bid_price, Price::from("-10.10"));
+        assert_eq!(permanent_quotes[0].ask_price, Price::from("-9.90"));
+        assert!(!permanent_agg.vega_pricing_temporarily_disabled);
     }
 
     #[rstest]
@@ -6294,6 +6818,8 @@ mod tests {
             false,
             None,
             0,
+            false,
+            60,
             None,
             Some(Box::new(rounder)),
         );

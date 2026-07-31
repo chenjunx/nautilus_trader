@@ -35,7 +35,7 @@ use crate::common::{
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
 )]
 pub struct BybitDataClientConfig {
     /// Optional API key for authenticated REST/WebSocket requests.
@@ -77,9 +77,9 @@ pub struct BybitDataClientConfig {
     /// Interval in minutes for instrument refresh from REST.
     /// When `None`, instrument refresh is disabled.
     pub update_instruments_interval_mins: Option<u64>,
-    /// Interval in seconds for polling instrument status changes.
-    /// When `None`, status polling is disabled.
-    pub instrument_status_poll_secs: Option<u64>,
+    /// Interval in seconds for polling instrument definitions and status changes from REST.
+    /// When `None`, instrument/status polling is disabled.
+    pub instrument_poll_interval_secs: Option<u64>,
     /// WebSocket transport backend (defaults to `Tungstenite`).
     #[builder(default)]
     pub transport_backend: TransportBackend,
@@ -89,7 +89,7 @@ impl Default for BybitDataClientConfig {
     fn default() -> Self {
         Self {
             update_instruments_interval_mins: Some(60),
-            instrument_status_poll_secs: Some(60),
+            instrument_poll_interval_secs: Some(60),
             ..Self::builder().build()
         }
     }
@@ -163,7 +163,7 @@ impl BybitDataClientConfig {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
 )]
 pub struct BybitExecClientConfig {
     /// API key for authenticated requests.

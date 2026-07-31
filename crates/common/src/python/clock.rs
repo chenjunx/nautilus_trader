@@ -13,6 +13,8 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+#![warn(clippy::clone_on_ref_ptr)]
+
 use std::{cell::RefCell, rc::Rc};
 
 use chrono::{DateTime, Duration, Utc};
@@ -255,7 +257,7 @@ impl PyClock {
     /// Gets the inner `Rc<RefCell<dyn Clock>>` for use in Rust code.
     #[must_use]
     pub fn clock_rc(&self) -> Rc<RefCell<dyn Clock>> {
-        self.0.clone()
+        Rc::clone(&self.0)
     }
 
     /// Creates a clock backed by [`TestClock`].
@@ -318,7 +320,7 @@ mod tests {
         TestClock::new()
     }
 
-    pub fn test_callback() -> TimeEventCallback {
+    pub(super) fn test_callback() -> TimeEventCallback {
         Python::initialize();
         Python::attach(|py| {
             let py_list = PyList::empty(py);
@@ -328,7 +330,7 @@ mod tests {
         })
     }
 
-    pub fn test_py_callback() -> Py<PyAny> {
+    pub(super) fn test_py_callback() -> Py<PyAny> {
         Python::initialize();
         Python::attach(|py| {
             let py_list = PyList::empty(py);

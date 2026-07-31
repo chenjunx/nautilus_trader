@@ -29,6 +29,7 @@ from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.nautilus_pyo3 import OKXContractType
 from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
 from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
+from nautilus_trader.core.nautilus_pyo3 import OKXRegion
 from nautilus_trader.live.factories import LiveDataClientFactory
 from nautilus_trader.live.factories import LiveExecClientFactory
 
@@ -106,6 +107,7 @@ def get_cached_okx_instrument_provider(
     instrument_types: tuple[OKXInstrumentType, ...],
     contract_types: tuple[OKXContractType, ...] | None = None,
     instrument_families: tuple[str, ...] | None = None,
+    load_spreads: bool = False,
     config: InstrumentProviderConfig | None = None,
 ) -> OKXInstrumentProvider:
     """
@@ -124,6 +126,8 @@ def get_cached_okx_instrument_provider(
     instrument_families : tuple[str, ...], optional
         The instrument families to load (e.g., "BTC-USD", "ETH-USD").
         Required for OPTIONS. Optional for FUTURES/SWAP.
+    load_spreads : bool, default False
+        If True, load OKX Nitro spread instruments.
     config : InstrumentProviderConfig, optional
         The instrument provider configuration, by default None.
 
@@ -137,6 +141,7 @@ def get_cached_okx_instrument_provider(
         instrument_types=instrument_types,
         contract_types=contract_types,
         instrument_families=instrument_families,
+        load_spreads=load_spreads,
         config=config,
     )
 
@@ -179,11 +184,13 @@ class OKXLiveDataClientFactory(LiveDataClientFactory):
 
         """
         environment = config.environment or OKXEnvironment.LIVE
+        region = config.region or OKXRegion.GLOBAL
+        base_url_http = config.base_url_http or nautilus_pyo3.get_okx_http_base_url(region)
         client: nautilus_pyo3.OKXHttpClient = get_cached_okx_http_client(
             api_key=config.api_key,
             api_secret=config.api_secret,
             api_passphrase=config.api_passphrase,
-            base_url=config.base_url_http,
+            base_url=base_url_http,
             environment=environment,
             timeout_secs=config.http_timeout_secs,
             max_retries=config.max_retries,
@@ -196,6 +203,7 @@ class OKXLiveDataClientFactory(LiveDataClientFactory):
             instrument_types=config.instrument_types,
             contract_types=config.contract_types,
             instrument_families=config.instrument_families,
+            load_spreads=config.load_spreads,
             config=config.instrument_provider,
         )
         return OKXDataClient(
@@ -248,11 +256,13 @@ class OKXLiveExecClientFactory(LiveExecClientFactory):
 
         """
         environment = config.environment or OKXEnvironment.LIVE
+        region = config.region or OKXRegion.GLOBAL
+        base_url_http = config.base_url_http or nautilus_pyo3.get_okx_http_base_url(region)
         client: nautilus_pyo3.OKXHttpClient = get_cached_okx_http_client(
             api_key=config.api_key,
             api_secret=config.api_secret,
             api_passphrase=config.api_passphrase,
-            base_url=config.base_url_http,
+            base_url=base_url_http,
             environment=environment,
             timeout_secs=config.http_timeout_secs,
             max_retries=config.max_retries,
@@ -265,6 +275,7 @@ class OKXLiveExecClientFactory(LiveExecClientFactory):
             instrument_types=config.instrument_types,
             contract_types=config.contract_types,
             instrument_families=config.instrument_families,
+            load_spreads=config.load_spreads,
             config=config.instrument_provider,
         )
         return OKXExecutionClient(

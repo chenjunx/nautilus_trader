@@ -16,6 +16,7 @@
 //! Integration tests for the Binance Futures HTTP client using a mock server.
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{
         Arc,
@@ -26,7 +27,7 @@ use std::{
 
 use axum::{
     Router,
-    extract::State,
+    extract::{RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -36,10 +37,22 @@ use nautilus_binance::{
         BinanceEnvironment, BinanceFuturesOrderType, BinanceProductType, BinanceSide,
         BinanceTimeInForce,
     },
-    futures::http::{client::BinanceRawFuturesHttpClient, query::BinanceNewOrderParamsBuilder},
+    futures::http::{
+        client::{BinanceFuturesHttpClient, BinanceRawFuturesHttpClient},
+        query::{BinanceNewOrderParamsBuilder, BinanceOpenInterestHistParams},
+    },
 };
+use nautilus_common::cache::InstrumentLookupError;
+use nautilus_core::time::get_atomic_clock_realtime;
+use nautilus_model::{data::BarType, identifiers::InstrumentId};
 use rstest::rstest;
 use serde_json::json;
+
+#[derive(Debug, Clone, Copy)]
+enum RequiredInstrumentCachePath {
+    Trades,
+    Bars,
+}
 
 #[derive(Clone)]
 struct TestServerState {
@@ -300,12 +313,43 @@ async fn handle_all_orders(headers: HeaderMap, State(state): State<TestServerSta
     json_response(&json!([]))
 }
 
+async fn handle_open_interest_hist(raw_query: RawQuery) -> Response {
+    let query = raw_query.0.unwrap_or_default();
+    let params: HashMap<String, String> = serde_urlencoded::from_str(&query).unwrap_or_default();
+
+    if params
+        .get("symbol")
+        .is_some_and(|symbol| symbol == "BTCUSDT")
+        && params.get("period").is_some_and(|period| period == "5m")
+    {
+        return json_response(&json!([
+            {
+                "symbol": "BTCUSDT",
+                "sumOpenInterest": "100.0",
+                "sumOpenInterestValue": "1000.0",
+                "timestamp": 1700000000000_i64
+            }
+        ]));
+    }
+
+    (
+        StatusCode::BAD_REQUEST,
+        [("content-type", "application/json")],
+        json!({"code": -1102, "msg": "Unexpected params"}).to_string(),
+    )
+        .into_response()
+}
+
 fn create_router(state: TestServerState) -> Router {
     Router::new()
         .route("/fapi/v1/ping", get(handle_ping))
         .route("/fapi/v1/time", get(handle_time))
         .route("/fapi/v1/exchangeInfo", get(handle_exchange_info))
         .route("/fapi/v1/depth", get(handle_depth))
+        .route(
+            "/futures/data/openInterestHist",
+            get(handle_open_interest_hist),
+        )
         .route("/fapi/v2/account", get(handle_account))
         .route("/fapi/v2/balance", get(handle_balance))
         .route("/fapi/v2/positionRisk", get(handle_position_risk))
@@ -360,6 +404,47 @@ fn create_raw_client(
         None,
     )
     .unwrap()
+}
+
+#[rstest]
+#[case::trades(RequiredInstrumentCachePath::Trades)]
+#[case::bars(RequiredInstrumentCachePath::Bars)]
+#[tokio::test]
+async fn test_public_market_data_request_missing_cached_instrument_returns_lookup_error(
+    #[case] path: RequiredInstrumentCachePath,
+) {
+    let client = BinanceFuturesHttpClient::new(
+        BinanceProductType::UsdM,
+        BinanceEnvironment::Live,
+        get_atomic_clock_realtime(),
+        None,
+        None,
+        Some("http://127.0.0.1:9".to_string()),
+        None,
+        Some(1),
+        None,
+        false,
+    )
+    .unwrap();
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BINANCE");
+
+    let result = match path {
+        RequiredInstrumentCachePath::Trades => {
+            client.request_trades(instrument_id, None).await.map(|_| ())
+        }
+        RequiredInstrumentCachePath::Bars => {
+            let bar_type = BarType::from("BTCUSDT-PERP.BINANCE-1-MINUTE-LAST-EXTERNAL");
+            client
+                .request_bars(bar_type, None, None, None)
+                .await
+                .map(|_| ())
+        }
+    };
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        InstrumentLookupError::not_found(instrument_id).to_string()
+    );
 }
 
 #[rstest]
@@ -425,6 +510,35 @@ async fn test_depth() {
         .unwrap();
     assert!(!result["bids"].as_array().unwrap().is_empty());
     assert!(!result["asks"].as_array().unwrap().is_empty());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_open_interest_hist_public_path() {
+    let addr = start_test_server(TestServerState::default()).await.unwrap();
+    let client = create_raw_client(&addr, None, None);
+    let params = BinanceOpenInterestHistParams {
+        symbol: Some("BTCUSDT".to_string()),
+        pair: None,
+        contract_type: None,
+        period: "5m".to_string(),
+        start_time: None,
+        end_time: None,
+        limit: Some(1),
+    };
+
+    let result: serde_json::Value = client
+        .get(
+            "/futures/data/openInterestHist",
+            Some(&params),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result[0]["symbol"], "BTCUSDT");
+    assert_eq!(result[0]["sumOpenInterest"], "100.0");
 }
 
 #[rstest]

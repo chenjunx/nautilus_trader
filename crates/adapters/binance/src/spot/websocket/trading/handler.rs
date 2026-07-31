@@ -136,9 +136,9 @@ impl BinanceSpotWsTradingHandler {
                         BinanceSpotWsTradingCommand::PlaceOrder { id, params } => {
                             if let Err(e) = self.handle_place_order(id.clone(), params).await {
                                 log::error!("Failed to handle place order command: {e}");
-                                self.emit(BinanceSpotWsTradingMessage::OrderRejected {
+                                self.pending_requests.remove(&id);
+                                self.emit(BinanceSpotWsTradingMessage::RequestFailed {
                                     request_id: id,
-                                    code: -1,
                                     msg: e.to_string(),
                                 });
                             }
@@ -146,9 +146,9 @@ impl BinanceSpotWsTradingHandler {
                         BinanceSpotWsTradingCommand::CancelOrder { id, params } => {
                             if let Err(e) = self.handle_cancel_order(id.clone(), params).await {
                                 log::error!("Failed to handle cancel order command: {e}");
-                                self.emit(BinanceSpotWsTradingMessage::CancelRejected {
+                                self.pending_requests.remove(&id);
+                                self.emit(BinanceSpotWsTradingMessage::RequestFailed {
                                     request_id: id,
-                                    code: -1,
                                     msg: e.to_string(),
                                 });
                             }
@@ -156,9 +156,9 @@ impl BinanceSpotWsTradingHandler {
                         BinanceSpotWsTradingCommand::CancelReplaceOrder { id, params } => {
                             if let Err(e) = self.handle_cancel_replace_order(id.clone(), params).await {
                                 log::error!("Failed to handle cancel replace command: {e}");
-                                self.emit(BinanceSpotWsTradingMessage::CancelReplaceRejected {
+                                self.pending_requests.remove(&id);
+                                self.emit(BinanceSpotWsTradingMessage::RequestFailed {
                                     request_id: id,
-                                    code: -1,
                                     msg: e.to_string(),
                                 });
                             }
@@ -166,9 +166,9 @@ impl BinanceSpotWsTradingHandler {
                         BinanceSpotWsTradingCommand::CancelAllOrders { id, symbol } => {
                             if let Err(e) = self.handle_cancel_all_orders(id.clone(), symbol).await {
                                 log::error!("Failed to handle cancel all command: {e}");
-                                self.emit(BinanceSpotWsTradingMessage::CancelRejected {
+                                self.pending_requests.remove(&id);
+                                self.emit(BinanceSpotWsTradingMessage::RequestFailed {
                                     request_id: id,
-                                    code: -1,
                                     msg: e.to_string(),
                                 });
                             }
@@ -195,7 +195,7 @@ impl BinanceSpotWsTradingHandler {
                     if let Message::Text(ref text) = msg
                         && text.as_str() == RECONNECTED
                     {
-                        log::info!("Handler received reconnection signal");
+                        log::debug!("Handler received reconnection signal");
 
                         // Fail any pending requests - they won't get responses on new connection
                         self.fail_pending_requests();
@@ -231,14 +231,11 @@ impl BinanceSpotWsTradingHandler {
         log::warn!("Failing {count} pending requests after reconnection");
 
         let pending = std::mem::take(&mut self.pending_requests);
-        for (request_id, meta) in pending {
-            let msg = self.create_rejection(
+        for (request_id, _meta) in pending {
+            self.emit(BinanceSpotWsTradingMessage::RequestFailed {
                 request_id,
-                -1,
-                "Connection lost before response received".to_string(),
-                meta,
-            );
-            self.emit(msg);
+                msg: "Connection lost before response received".to_string(),
+            });
         }
     }
 
@@ -465,7 +462,7 @@ impl BinanceSpotWsTradingHandler {
                 // Success response
                 match meta {
                     BinanceSpotWsTradingRequestMeta::SessionLogon => {
-                        log::info!("Session authenticated");
+                        log::debug!("Session authenticated");
                         self.emit(BinanceSpotWsTradingMessage::Authenticated);
                     }
                     BinanceSpotWsTradingRequestMeta::SubscribeUserData => {
@@ -474,7 +471,7 @@ impl BinanceSpotWsTradingHandler {
                             .and_then(|r| r.get("subscriptionId"))
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        log::info!("User data stream subscribed: id={subscription_id}");
+                        log::debug!("User data stream subscribed: id={subscription_id}");
                         self.emit(BinanceSpotWsTradingMessage::UserDataSubscribed {
                             subscription_id,
                         });
@@ -678,11 +675,11 @@ impl BinanceSpotWsTradingHandler {
                 })
             }
             BinanceSpotWsTradingRequestMeta::SessionLogon => {
-                log::info!("Session authenticated (SBE response)");
+                log::debug!("Session authenticated (SBE response)");
                 Ok(BinanceSpotWsTradingMessage::Authenticated)
             }
             BinanceSpotWsTradingRequestMeta::SubscribeUserData => {
-                log::info!("User data stream subscribed (SBE response)");
+                log::debug!("User data stream subscribed (SBE response)");
                 Ok(BinanceSpotWsTradingMessage::UserDataSubscribed {
                     subscription_id: request_id,
                 })

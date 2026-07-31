@@ -14,11 +14,14 @@
 // -------------------------------------------------------------------------------------------------
 
 use nautilus_common::actor::DataActor;
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::QuoteTick,
     enums::OrderSide,
-    events::{OrderCanceled, OrderExpired, OrderRejected},
+    events::{
+        OrderCanceled, OrderExpired, OrderRejected,
+        order::spec::{OrderCanceledSpec, OrderExpiredSpec, OrderRejectedSpec},
+    },
     identifiers::{AccountId, ClientOrderId, InstrumentId, StrategyId, TraderId},
     instruments::{InstrumentAny, stubs::crypto_perpetual_ethusdt},
     types::{Price, Quantity},
@@ -47,12 +50,16 @@ fn create_strategy(
     max_position: Quantity,
     requote_threshold_bps: u32,
 ) -> CompositeMarketMaker {
-    let config = CompositeMarketMakerConfig::new(instrument_id(), signal_id(), max_position)
-        .with_trade_size(Quantity::from("0.100"))
-        .with_half_spread_bps(half_spread_bps)
-        .with_inventory_skew_factor(inventory_skew_factor)
-        .with_signal_skew_factor(signal_skew_factor)
-        .with_requote_threshold_bps(requote_threshold_bps);
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(max_position)
+        .trade_size(Quantity::from("0.100"))
+        .half_spread_bps(half_spread_bps)
+        .inventory_skew_factor(inventory_skew_factor)
+        .signal_skew_factor(signal_skew_factor)
+        .requote_threshold_bps(requote_threshold_bps)
+        .build();
 
     let mut strategy = CompositeMarketMaker::new(config);
     strategy.price_precision = Some(PRECISION);
@@ -74,6 +81,29 @@ fn quote(instrument: InstrumentId, bid: &str, ask: &str) -> QuoteTick {
         UnixNanos::default(),
         UnixNanos::default(),
     )
+}
+
+#[rstest]
+fn test_config_defaults() {
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(Quantity::from("10.0"))
+        .build();
+
+    assert_eq!(
+        config.base.strategy_id,
+        Some(StrategyId::from("COMPOSITE_MM-001")),
+    );
+    assert_eq!(config.base.order_id_tag, Some("001".to_string()));
+    assert_eq!(config.trade_size, None);
+    assert_eq!(config.half_spread_bps, 5);
+    assert_eq!(config.inventory_skew_factor, 0.0);
+    assert_eq!(config.signal_skew_factor, 0.0);
+    assert_eq!(config.signal_baseline, None);
+    assert_eq!(config.requote_threshold_bps, 5);
+    assert_eq!(config.expire_time_secs, None);
+    assert!(!config.on_cancel_resubmit);
 }
 
 #[rstest]
@@ -186,7 +216,9 @@ fn test_should_requote_on_anchor_with_zero_last_anchor() {
 fn test_compute_quotes_flat_no_signal_symmetric() {
     // 10 bps half-spread on 1000 anchor -> 1.00 each side.
     let strategy = create_strategy(10, 0.0, 0.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.0, 0.0, dec!(0), dec!(0));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.0, 0.0, dec!(0), dec!(0))
+        .unwrap();
 
     assert_eq!(quotes.len(), 2);
     assert_eq!(quotes[0], (OrderSide::Buy, price("999.00")));
@@ -197,7 +229,9 @@ fn test_compute_quotes_flat_no_signal_symmetric() {
 fn test_compute_quotes_inventory_skew_long_shifts_down() {
     // 100 bps half-spread, inv_skew=1.0, net_position=2.0 -> total shift -2.0.
     let strategy = create_strategy(100, 1.0, 0.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.0, 2.0, dec!(2), dec!(2));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.0, 2.0, dec!(2), dec!(2))
+        .unwrap();
 
     assert_eq!(quotes.len(), 2);
     // bid = 1000 - 10 - 2 = 988.00, ask = 1000 + 10 - 2 = 1008.00
@@ -208,7 +242,9 @@ fn test_compute_quotes_inventory_skew_long_shifts_down() {
 #[rstest]
 fn test_compute_quotes_inventory_skew_short_shifts_up() {
     let strategy = create_strategy(100, 1.0, 0.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.0, -2.0, dec!(-2), dec!(-2));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.0, -2.0, dec!(-2), dec!(-2))
+        .unwrap();
 
     assert_eq!(quotes.len(), 2);
     // total shift = +2.0, bid = 992.00, ask = 1012.00
@@ -220,7 +256,9 @@ fn test_compute_quotes_inventory_skew_short_shifts_up() {
 fn test_compute_quotes_signal_skew_positive_residual_lifts() {
     // 100 bps half-spread, signal_skew=10.0, residual=+0.05 -> total shift +0.50.
     let strategy = create_strategy(100, 0.0, 10.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.05, 0.0, dec!(0), dec!(0));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.05, 0.0, dec!(0), dec!(0))
+        .unwrap();
 
     assert_eq!(quotes.len(), 2);
     // bid = 1000 - 10 + 0.5 = 990.50, ask = 1000 + 10 + 0.5 = 1010.50
@@ -233,7 +271,9 @@ fn test_compute_quotes_combined_skew() {
     // half=100bps (10.0), inv_skew=1.0 with pos=2 -> -2.0,
     // sig_skew=10.0 with residual=+0.05 -> +0.5. total shift = +0.5 - 2.0 = -1.5.
     let strategy = create_strategy(100, 1.0, 10.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.05, 2.0, dec!(2), dec!(2));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.05, 2.0, dec!(2), dec!(2))
+        .unwrap();
 
     assert_eq!(quotes.len(), 2);
     assert_eq!(quotes[0], (OrderSide::Buy, price("988.50")));
@@ -244,7 +284,9 @@ fn test_compute_quotes_combined_skew() {
 fn test_compute_quotes_max_position_blocks_buy() {
     // worst_long=10.0 already at cap, trade_size=0.1 -> buy blocked.
     let strategy = create_strategy(10, 0.0, 0.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.0, 10.0, dec!(10), dec!(10));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.0, 10.0, dec!(10), dec!(10))
+        .unwrap();
 
     assert_eq!(quotes.len(), 1);
     assert_eq!(quotes[0].0, OrderSide::Sell);
@@ -253,7 +295,9 @@ fn test_compute_quotes_max_position_blocks_buy() {
 #[rstest]
 fn test_compute_quotes_max_position_blocks_sell() {
     let strategy = create_strategy(10, 0.0, 0.0, Quantity::from("10.0"), 5);
-    let quotes = strategy.compute_quotes(price("1000.00"), 0.0, -10.0, dec!(-10), dec!(-10));
+    let quotes = strategy
+        .compute_quotes(price("1000.00"), 0.0, -10.0, dec!(-10), dec!(-10))
+        .unwrap();
 
     assert_eq!(quotes.len(), 1);
     assert_eq!(quotes[0].0, OrderSide::Buy);
@@ -264,8 +308,12 @@ fn test_compute_quotes_skew_preserves_spread() {
     // Inventory and signal skew shift both sides equally, so the quoted
     // spread (ask - bid) is invariant in skew under the symmetric model.
     let strategy = create_strategy(50, 0.5, 5.0, Quantity::from("10.0"), 5);
-    let flat = strategy.compute_quotes(price("1000.00"), 0.0, 0.0, dec!(0), dec!(0));
-    let skewed = strategy.compute_quotes(price("1000.00"), 0.02, 3.0, dec!(3), dec!(3));
+    let flat = strategy
+        .compute_quotes(price("1000.00"), 0.0, 0.0, dec!(0), dec!(0))
+        .unwrap();
+    let skewed = strategy
+        .compute_quotes(price("1000.00"), 0.02, 3.0, dec!(3), dec!(3))
+        .unwrap();
 
     assert_eq!(flat.len(), 2);
     assert_eq!(skewed.len(), 2);
@@ -275,26 +323,58 @@ fn test_compute_quotes_skew_preserves_spread() {
     assert!((flat_spread - skewed_spread).abs() < 1e-9);
 }
 
+#[rstest]
+fn test_compute_quotes_errors_when_instrument_not_resolved() {
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(Quantity::from("10.0"))
+        .trade_size(Quantity::from("0.100"))
+        .build();
+    let strategy = CompositeMarketMaker::new(config);
+
+    let err = strategy
+        .compute_quotes(price("1000.00"), 0.0, 0.0, dec!(0), dec!(0))
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(err, "Cannot compute quotes: instrument is not resolved");
+}
+
+#[rstest]
+fn test_on_quote_errors_when_price_precision_not_resolved() {
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(Quantity::from("10.0"))
+        .trade_size(Quantity::from("0.100"))
+        .build();
+    let mut strategy = CompositeMarketMaker::new(config);
+    strategy.instrument = Some(InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt()));
+
+    let tick = quote(instrument_id(), "1000.00", "1000.10");
+    let err = strategy.on_quote(&tick).unwrap_err().to_string();
+
+    assert_eq!(err, "Cannot handle quote: price_precision is not resolved");
+}
+
 fn order_canceled(client_order_id: &str) -> OrderCanceled {
-    OrderCanceled::new(
-        TraderId::from("TESTER-001"),
-        StrategyId::from("COMPOSITE_MM-001"),
-        instrument_id(),
-        ClientOrderId::from(client_order_id),
-        UUID4::new(),
-        0.into(),
-        0.into(),
-        false,
-        None,
-        None,
-    )
+    OrderCanceledSpec::builder()
+        .trader_id(TraderId::from("TESTER-001"))
+        .strategy_id(StrategyId::from("COMPOSITE_MM-001"))
+        .instrument_id(instrument_id())
+        .client_order_id(ClientOrderId::from(client_order_id))
+        .build()
 }
 
 fn create_cancel_resubmit_strategy() -> CompositeMarketMaker {
-    let config =
-        CompositeMarketMakerConfig::new(instrument_id(), signal_id(), Quantity::from("10.0"))
-            .with_trade_size(Quantity::from("0.100"))
-            .with_on_cancel_resubmit(true);
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(Quantity::from("10.0"))
+        .trade_size(Quantity::from("0.100"))
+        .on_cancel_resubmit(true)
+        .build();
 
     let mut strategy = CompositeMarketMaker::new(config);
     strategy.price_precision = Some(PRECISION);
@@ -320,11 +400,14 @@ fn test_signal_tick_updates_last_signal_and_captures_baseline_once() {
 fn test_signal_tick_does_not_overwrite_explicit_baseline() {
     // When the config carries an explicit baseline, signal ticks update
     // last_signal but never the baseline.
-    let config =
-        CompositeMarketMakerConfig::new(instrument_id(), signal_id(), Quantity::from("10.0"))
-            .with_trade_size(Quantity::from("0.100"))
-            .with_signal_skew_factor(1.0)
-            .with_signal_baseline(50.0);
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(Quantity::from("10.0"))
+        .trade_size(Quantity::from("0.100"))
+        .signal_skew_factor(1.0)
+        .signal_baseline(50.0)
+        .build();
     let mut strategy = CompositeMarketMaker::new(config);
     strategy.price_precision = Some(PRECISION);
     strategy.instrument = Some(InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt()));
@@ -397,34 +480,24 @@ fn test_on_order_canceled_without_resubmit_does_nothing() {
 }
 
 fn order_rejected(client_order_id: &str) -> OrderRejected {
-    OrderRejected::new(
-        TraderId::from("TESTER-001"),
-        StrategyId::from("COMPOSITE_MM-001"),
-        instrument_id(),
-        ClientOrderId::from(client_order_id),
-        AccountId::from("ACC-001"),
-        Ustr::from("POST_ONLY_ORDER"),
-        UUID4::new(),
-        UnixNanos::default(),
-        UnixNanos::default(),
-        false,
-        true,
-    )
+    OrderRejectedSpec::builder()
+        .trader_id(TraderId::from("TESTER-001"))
+        .strategy_id(StrategyId::from("COMPOSITE_MM-001"))
+        .instrument_id(instrument_id())
+        .client_order_id(ClientOrderId::from(client_order_id))
+        .account_id(AccountId::from("ACC-001"))
+        .reason(Ustr::from("POST_ONLY_ORDER"))
+        .due_post_only(true)
+        .build()
 }
 
 fn order_expired(client_order_id: &str) -> OrderExpired {
-    OrderExpired::new(
-        TraderId::from("TESTER-001"),
-        StrategyId::from("COMPOSITE_MM-001"),
-        instrument_id(),
-        ClientOrderId::from(client_order_id),
-        UUID4::new(),
-        UnixNanos::default(),
-        UnixNanos::default(),
-        false,
-        None,
-        None,
-    )
+    OrderExpiredSpec::builder()
+        .trader_id(TraderId::from("TESTER-001"))
+        .strategy_id(StrategyId::from("COMPOSITE_MM-001"))
+        .instrument_id(instrument_id())
+        .client_order_id(ClientOrderId::from(client_order_id))
+        .build()
 }
 
 #[rstest]
@@ -512,10 +585,13 @@ fn test_on_reset_clears_all_state() {
 fn test_on_reset_reverts_signal_baseline_to_config_value() {
     // When the config carries an explicit baseline, reset reverts to that
     // configured value, not None.
-    let config =
-        CompositeMarketMakerConfig::new(instrument_id(), signal_id(), Quantity::from("10.0"))
-            .with_trade_size(Quantity::from("0.100"))
-            .with_signal_baseline(50.0);
+    let config = CompositeMarketMakerConfig::builder()
+        .instrument_id(instrument_id())
+        .signal_instrument_id(signal_id())
+        .max_position(Quantity::from("10.0"))
+        .trade_size(Quantity::from("0.100"))
+        .signal_baseline(50.0)
+        .build();
     let mut strategy = CompositeMarketMaker::new(config);
     strategy.price_precision = Some(PRECISION);
     strategy.instrument = Some(InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt()));

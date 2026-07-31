@@ -129,19 +129,13 @@ pub fn parse_order_status_report(
     let order_side = OrderSide::from(order.side);
     let time_in_force = TimeInForce::from(order.order_type);
     let order_status = OrderStatus::from(order.status);
-    let quantity = Quantity::new(
-        order.original_size.to_string().parse().unwrap_or(0.0),
-        size_precision,
-    );
-    let raw_filled_qty = Quantity::new(
-        order.size_matched.to_string().parse().unwrap_or(0.0),
-        size_precision,
-    );
+    let quantity = Quantity::from_decimal_dp(order.original_size, size_precision)
+        .unwrap_or_else(|_| Quantity::zero(size_precision));
+    let raw_filled_qty = Quantity::from_decimal_dp(order.size_matched, size_precision)
+        .unwrap_or_else(|_| Quantity::zero(size_precision));
     let filled_qty = snap_filled_qty_to_quantity(quantity, raw_filled_qty, order_status);
-    let price = Price::new(
-        order.price.to_string().parse().unwrap_or(0.0),
-        price_precision,
-    );
+    let price = Price::from_decimal_dp(order.price, price_precision)
+        .unwrap_or_else(|_| Price::zero(price_precision));
 
     let ts_accepted = UnixNanos::from(order.created_at * NANOSECONDS_IN_SECOND);
 
@@ -201,14 +195,10 @@ pub fn parse_fill_report(
     let venue_order_id = VenueOrderId::from(trade.taker_order_id.as_str());
     let trade_id = TradeId::from(trade.id.as_str());
     let order_side = OrderSide::from(trade.side);
-    let last_qty = Quantity::new(
-        trade.size.to_string().parse().unwrap_or(0.0),
-        size_precision,
-    );
-    let last_px = Price::new(
-        trade.price.to_string().parse().unwrap_or(0.0),
-        price_precision,
-    );
+    let last_qty = Quantity::from_decimal_dp(trade.size, size_precision)
+        .unwrap_or_else(|_| Quantity::zero(size_precision));
+    let last_px = Price::from_decimal_dp(trade.price, price_precision)
+        .unwrap_or_else(|_| Price::zero(price_precision));
     let liquidity_side = parse_liquidity_side(trade.trader_side);
 
     let commission_value =
@@ -265,14 +255,10 @@ pub fn build_maker_fill_report(
         taker_asset_id,
         mo.asset_id.as_str(),
     );
-    let last_qty = Quantity::new(
-        mo.matched_amount.to_string().parse::<f64>().unwrap_or(0.0),
-        size_precision,
-    );
-    let last_px = Price::new(
-        mo.price.to_string().parse::<f64>().unwrap_or(0.0),
-        price_precision,
-    );
+    let last_qty = Quantity::from_decimal_dp(mo.matched_amount, size_precision)
+        .unwrap_or_else(|_| Quantity::zero(size_precision));
+    let last_px = Price::from_decimal_dp(mo.price, price_precision)
+        .unwrap_or_else(|_| Price::zero(price_precision));
     // Maker fills always pay zero commission per Polymarket docs:
     // https://docs.polymarket.com/trading/fees
     let commission_value =
@@ -589,6 +575,12 @@ pub fn parse_timestamp(ts_str: &str) -> Option<UnixNanos> {
 
 #[cfg(test)]
 mod tests {
+    use nautilus_execution::models::fee::{FeeModel, ProbabilityPriceFeeModel};
+    use nautilus_model::{
+        enums::OrderType,
+        instruments::{Instrument, InstrumentAny, stubs::binary_option},
+        orders::{OrderAny, builder::OrderTestBuilder, stubs::TestOrderStubs},
+    };
     use rstest::rstest;
     use rust_decimal_macros::dec;
     use ustr::Ustr;
@@ -647,6 +639,21 @@ mod tests {
             UnixNanos::default(),
             None,
         )
+    }
+
+    fn binary_option_fill_order(
+        instrument: &InstrumentAny,
+        liquidity_side: LiquiditySide,
+        price: &str,
+    ) -> OrderAny {
+        let limit_order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(instrument.id())
+            .side(OrderSide::Buy)
+            .price(Price::from(price))
+            .quantity(Quantity::from("100.00"))
+            .build();
+
+        TestOrderStubs::make_filled_order(&limit_order, instrument, liquidity_side)
     }
 
     #[rstest]
@@ -782,6 +789,44 @@ mod tests {
             LiquiditySide::Maker,
         );
         assert_eq!(commission, 0.0);
+    }
+
+    #[rstest]
+    #[case::crypto_taker("0.072", "0.970", LiquiditySide::Taker)]
+    #[case::sports_taker("0.03", "0.500", LiquiditySide::Taker)]
+    #[case::politics_taker("0.04", "0.300", LiquiditySide::Taker)]
+    #[case::maker_zero("0.03", "0.500", LiquiditySide::Maker)]
+    fn test_probability_price_fee_model_matches_polymarket_commission(
+        #[case] taker_fee: &str,
+        #[case] price: &str,
+        #[case] liquidity_side: LiquiditySide,
+    ) {
+        let mut binary = binary_option();
+        binary.maker_fee = Decimal::ZERO;
+        binary.taker_fee = Decimal::from_str_exact(taker_fee).unwrap();
+        let instrument = InstrumentAny::BinaryOption(binary);
+        let order = binary_option_fill_order(&instrument, liquidity_side, price);
+        let fee_model = ProbabilityPriceFeeModel;
+
+        let commission = fee_model
+            .get_commission(
+                &order,
+                Quantity::from("100.00"),
+                Price::from(price),
+                &instrument,
+            )
+            .unwrap();
+
+        let expected = compute_commission(
+            Decimal::from_str_exact(taker_fee).unwrap(),
+            dec!(100),
+            Decimal::from_str_exact(price).unwrap(),
+            liquidity_side,
+        );
+
+        let expected = Decimal::from_str_exact(expected.to_string().as_str()).unwrap();
+
+        assert_eq!(commission.as_decimal(), expected);
     }
 
     /// Reference computations for `adjust_market_buy_amount` follow the SDK

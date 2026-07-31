@@ -28,16 +28,18 @@
 //!
 //! ## Supported Keys
 //!
-//! | Key                   | Type      | Description                                  |
-//! |-----------------------|-----------|----------------------------------------------|
-//! | `stdout`              | Log level | Maximum level for stdout output.             |
-//! | `fileout`             | Log level | Maximum level for file output.               |
-//! | `is_colored`          | Boolean   | Enable ANSI colors (default: true).          |
-//! | `print_config`        | Boolean   | Print config to stdout at startup.           |
-//! | `log_components_only` | Boolean   | Only log components with explicit filters.   |
-//! | `use_tracing`         | Boolean   | Enable tracing subscriber for external libs. |
-//! | `<component>`         | Log level | Component-specific log level (exact match).  |
-//! | `<module::path>`      | Log level | Module-specific log level (prefix match).    |
+//! | Key                     | Type      | Description                                  |
+//! |-------------------------|-----------|----------------------------------------------|
+//! | `stdout`                | Log level | Maximum level for stdout output.             |
+//! | `fileout`               | Log level | Maximum level for file output.               |
+//! | `is_colored`            | Boolean   | Enable ANSI colors (default: true).          |
+//! | `print_config`          | Boolean   | Print config to stdout at startup.           |
+//! | `log_components_only`   | Boolean   | Only log components with explicit filters.   |
+//! | `use_tracing`           | Boolean   | Enable tracing subscriber for external libs. |
+//! | `fileout_sync_on_flush` | Boolean   | Sync file logs on every flush (default: true). |
+//! | `buffered_stdout`       | Boolean   | Buffer stdout output (default: false).       |
+//! | `<component>`           | Log level | Component-specific log level (exact match).  |
+//! | `<module::path>`        | Log level | Module-specific log level (prefix match).    |
 //!
 //! ## Log Levels
 //!
@@ -63,6 +65,7 @@ use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
 use super::writer::FileWriterConfig;
+use crate::config::ConfigResult;
 
 /// Configuration for the Nautilus logger.
 #[cfg_attr(
@@ -74,6 +77,7 @@ use super::writer::FileWriterConfig;
     pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
+#[builder(finish_fn(name = build_inner, vis = ""))]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggerConfig {
     /// Maximum log level for stdout output.
@@ -108,11 +112,33 @@ pub struct LoggerConfig {
     /// If the log file should be cleared before use.
     #[builder(default)]
     pub clear_log_file: bool,
+    /// If file log flushes should also sync data to disk.
+    #[builder(default = true)]
+    pub fileout_sync_on_flush: bool,
+    /// If stdout writes should be buffered until flush or buffer capacity.
+    #[builder(default)]
+    pub buffered_stdout: bool,
+}
+
+impl<S: logger_config_builder::IsComplete> LoggerConfigBuilder<S> {
+    /// Validates and builds the [`LoggerConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`](crate::config::ConfigError) if any field fails validation
+    /// (see [`LoggerConfig::validate`]).
+    pub fn build(self) -> ConfigResult<LoggerConfig> {
+        let config = self.build_inner();
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 impl Default for LoggerConfig {
     fn default() -> Self {
-        Self::builder().build()
+        Self::builder()
+            .build()
+            .expect("default `LoggerConfig` should be valid")
     }
 }
 
@@ -145,7 +171,23 @@ impl LoggerConfig {
             bypass_logging,
             file_config,
             clear_log_file,
+            fileout_sync_on_flush: true,
+            buffered_stdout: false,
         }
+    }
+
+    /// Validates the logger configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`](crate::config::ConfigError) if the file writer configuration
+    /// is invalid (see [`FileWriterConfig::validate`]).
+    pub fn validate(&self) -> ConfigResult<()> {
+        if let Some(file_config) = &self.file_config {
+            file_config.validate()?;
+        }
+
+        Ok(())
     }
 
     /// Parses a configuration from a spec string.
@@ -179,6 +221,8 @@ impl LoggerConfig {
                     "print_config" => config.print_config = true,
                     "use_tracing" => config.use_tracing = true,
                     "bypass_logging" => config.bypass_logging = true,
+                    "fileout_sync_on_flush" => config.fileout_sync_on_flush = true,
+                    "buffered_stdout" => config.buffered_stdout = true,
                     _ => anyhow::bail!("Invalid spec pair: {kv}"),
                 }
                 continue;
@@ -208,6 +252,12 @@ impl LoggerConfig {
                 }
                 "bypass_logging" => {
                     config.bypass_logging = parse_bool_value(v);
+                }
+                "fileout_sync_on_flush" => {
+                    config.fileout_sync_on_flush = parse_bool_value(v);
+                }
+                "buffered_stdout" => {
+                    config.buffered_stdout = parse_bool_value(v);
                 }
                 "stdout" => {
                     config.stdout_level = parse_level(v)?;
@@ -258,6 +308,23 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::config::ConfigError;
+
+    #[rstest]
+    fn test_zero_rotation_max_file_size_rejected() {
+        let file_config = FileWriterConfig::new(None, None, None, Some((0, 5)));
+        let result = LoggerConfig::builder().file_config(file_config).build();
+        assert!(
+            matches!(result, Err(ConfigError::Range { field, .. }) if field == "file_config.file_rotate.max_file_size")
+        );
+    }
+
+    #[rstest]
+    fn test_positive_rotation_max_file_size_accepted() {
+        let file_config = FileWriterConfig::new(None, None, None, Some((1_048_576, 5)));
+        let result = LoggerConfig::builder().file_config(file_config).build();
+        assert!(result.is_ok());
+    }
 
     #[rstest]
     fn test_default_config() {
@@ -271,6 +338,8 @@ mod tests {
         assert!(!config.bypass_logging);
         assert!(config.file_config.is_none());
         assert!(!config.clear_log_file);
+        assert!(config.fileout_sync_on_flush);
+        assert!(!config.buffered_stdout);
     }
 
     #[rstest]
@@ -371,6 +440,18 @@ mod tests {
     fn test_from_spec_log_components_only_false() {
         let config = LoggerConfig::from_spec("log_components_only=false").unwrap();
         assert!(!config.log_components_only);
+    }
+
+    #[rstest]
+    fn test_from_spec_fileout_sync_on_flush_false() {
+        let config = LoggerConfig::from_spec("fileout_sync_on_flush=false").unwrap();
+        assert!(!config.fileout_sync_on_flush);
+    }
+
+    #[rstest]
+    fn test_from_spec_buffered_stdout() {
+        let config = LoggerConfig::from_spec("buffered_stdout").unwrap();
+        assert!(config.buffered_stdout);
     }
 
     #[rstest]

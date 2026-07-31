@@ -28,12 +28,14 @@ on:
       - Cargo.lock # Keep in sync with scripts/ci/security-audit-gate.sh.
       - Cargo.toml
       - crates/**/Cargo.toml
+      - crates/**/fuzz/Cargo.lock
       - uv.lock
       - pyproject.toml
       - .pre-commit-config.yaml
       - python/uv.lock
       - python/pyproject.toml
       - deny.toml
+      - .cargo/deny-fuzz.toml
       - osv-scanner.toml
       - .supply-chain/**
       - tools.toml
@@ -61,14 +63,14 @@ jobs:
     outputs:
       audit_needed: ${{ steps.filter.outputs.audit_needed }}
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -94,7 +96,7 @@ jobs:
       actions: read
       security-events: write
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -102,7 +104,7 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -111,7 +113,7 @@ jobs:
         run: echo "uv_version=$(bash scripts/uv-version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: ${{ steps.uv-version.outputs.uv_version }}
           enable-cache: true
@@ -130,7 +132,7 @@ jobs:
           hashFiles('zizmor.sarif') != '' &&
           (github.event_name != 'pull_request' ||
           !github.event.pull_request.head.repo.fork)
-        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: zizmor.sarif
           category: zizmor
@@ -141,7 +143,7 @@ jobs:
     if: needs.changes.outputs.audit_needed == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -149,7 +151,7 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -159,7 +161,10 @@ jobs:
           tool-name: cargo-audit
 
       - name: Run cargo-audit
-        run: cargo audit
+        run: |
+          cargo audit
+          cargo audit --file crates/adapters/lighter/fuzz/Cargo.lock
+          cargo audit --file crates/adapters/derive/fuzz/Cargo.lock
 
   cargo-deny:
     name: cargo-deny
@@ -167,7 +172,7 @@ jobs:
     if: needs.changes.outputs.audit_needed == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -175,7 +180,7 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -185,7 +190,14 @@ jobs:
           tool-name: cargo-deny
 
       - name: Run cargo-deny (advisories, licenses, sources, bans)
-        run: cargo deny --all-features check advisories licenses sources bans
+        run: |
+          cargo deny --all-features check advisories licenses sources bans
+          cargo deny --manifest-path crates/adapters/lighter/fuzz/Cargo.toml \
+            --locked --all-features check --config .cargo/deny-fuzz.toml \
+            advisories licenses sources bans
+          cargo deny --manifest-path crates/adapters/derive/fuzz/Cargo.toml \
+            --locked --all-features check --config .cargo/deny-fuzz.toml \
+            advisories licenses sources bans
 
   cargo-vet:
     name: cargo-vet
@@ -193,7 +205,7 @@ jobs:
     if: needs.changes.outputs.audit_needed == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -201,7 +213,7 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -211,7 +223,12 @@ jobs:
           tool-name: cargo-vet
 
       - name: Run cargo-vet
-        run: cargo vet --locked
+        run: |
+          cargo vet --locked
+          cargo vet --locked --manifest-path crates/adapters/lighter/fuzz/Cargo.toml \
+            --store-path .supply-chain
+          cargo vet --locked --manifest-path crates/adapters/derive/fuzz/Cargo.toml \
+            --store-path .supply-chain
 
   pip-audit:
     name: pip-audit
@@ -219,7 +236,7 @@ jobs:
     if: needs.changes.outputs.audit_needed == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -227,7 +244,7 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -237,7 +254,7 @@ jobs:
           echo "UV_VERSION=$(bash scripts/uv-version.sh)" >> "$GITHUB_ENV"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -245,10 +262,14 @@ jobs:
         run: uv python install 3.13
 
       - name: Run pip-audit
+        # aiohttp 3.14.0 fixes these advisories, but remains inside uv's 3-day
+        # exclude-newer window while aiohttp source builds are disabled.
         run: >
           uv export --no-hashes --frozen |
           uv run --no-project --no-build --with "pip-audit==$(bash scripts/tool-version.sh pip-audit)" --
           pip-audit --disable-pip --no-deps -r /dev/stdin
+          --ignore-vuln GHSA-jg22-mg44-37j8
+          --ignore-vuln GHSA-hg6j-4rv6-33pg
 
   osv-scanner:
     name: osv-scanner
@@ -256,7 +277,7 @@ jobs:
     if: needs.changes.outputs.audit_needed == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -264,15 +285,17 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
       - name: Run osv-scanner
-        uses: google/osv-scanner-action/osv-scanner-action@c51854704019a247608d928f370c98740469d4b5 # v2.3.5
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
             --config=osv-scanner.toml
             --lockfile=Cargo.lock
+            --lockfile=crates/adapters/lighter/fuzz/Cargo.lock
+            --lockfile=crates/adapters/derive/fuzz/Cargo.lock
             --lockfile=uv.lock
             --lockfile=python/uv.lock

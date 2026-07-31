@@ -25,14 +25,18 @@ use nautilus_core::{
 };
 use nautilus_model::{
     data::{Bar, BarType, BookOrder, TradeTick},
-    enums::{AccountType, AggressorSide, BookType, OptionKind, OrderSide},
+    enums::{AccountType, AggressorSide, BookType, InstrumentClass, OptionKind, OrderSide},
     events::AccountState,
     identifiers::{AccountId, InstrumentId, Symbol, TradeId},
-    instruments::{CryptoFuture, CryptoOption, CryptoPerpetual, CurrencyPair, any::InstrumentAny},
+    instruments::{
+        CryptoFuture, CryptoFuturesSpread, CryptoOption, CryptoOptionSpread, CryptoPerpetual,
+        CurrencyPair, Instrument, any::InstrumentAny,
+    },
     orderbook::OrderBook,
     types::{AccountBalance, Currency, MarginBalance, Money, Price, Quantity},
 };
 use rust_decimal::Decimal;
+use ustr::Ustr;
 
 use crate::{
     common::{
@@ -54,6 +58,9 @@ use crate::{
 /// - **Option**: `{CURRENCY}-{DMMMYY}-{STRIKE}-{C|P}` (e.g., "BTC-25MAR23-420-C", "BTC-5AUG23-580-P")
 /// - **Linear Option**: `{BASE}_{QUOTE}-{DMMMYY}-{STRIKE}-{C|P}` (e.g., "XRP_USDC-30JUN23-0d625-C")
 ///   - Note: `d` is used as decimal point for decimal strikes (0d625 = 0.625)
+/// - **Future combo**: `{CURRENCY}-FS-{LEG_A}_{LEG_B}` (e.g., "BTC-FS-19MAY26_PERP")
+/// - **Option combo**: `{CURRENCY}-{STRATEGY}-{DMMMYY}-{STRIKES}` (e.g., "BTC-CS-19MAY26-70000_75000",
+///   "BTC-STRG-29MAY26-72000_80000", "BTC-STRD-29MAY26-77000", "BTC-BOX-25DEC26-58000_60000")
 /// - **Spot**: `{BASE}_{QUOTE}` (e.g., "BTC_USDC")
 ///
 /// Returns `(kind, currency)` tuple for `instrument.state.{kind}.{currency}` channel.
@@ -74,6 +81,14 @@ pub fn parse_instrument_kind_currency(instrument_id: &InstrumentId) -> (String, 
     } else if symbol.contains('_') && !symbol.contains('-') {
         // Spot pairs have underscore but no dash (e.g., "BTC_USDC")
         "spot"
+    } else if is_combo_symbol(symbol) {
+        // Combos have an alphabetic strategy code as the second segment.
+        // "FS" -> future spread (e.g., BTC-FS-19MAY26_PERP);
+        // any other alpha code -> option combo (CS, STRG, STRD, BOX, RR, ...).
+        match second_segment(symbol) {
+            Some("FS") => "future_combo",
+            _ => "option_combo",
+        }
     } else {
         // Default to future for expiry dates like "BTC-25MAR23"
         "future"
@@ -100,6 +115,35 @@ pub fn parse_instrument_kind_currency(instrument_id: &InstrumentId) -> (String, 
     (kind.to_string(), currency)
 }
 
+/// Returns the segment of a Deribit symbol immediately after the currency.
+///
+/// For `BTC-FS-19MAY26_PERP` returns `Some("FS")`. For `BTC-PERPETUAL` returns
+/// `Some("PERPETUAL")`. Returns `None` for symbols without two `-`-delimited
+/// segments.
+fn second_segment(symbol: &str) -> Option<&str> {
+    let mut parts = symbol.split('-');
+    parts.next()?;
+    parts.next()
+}
+
+/// Returns `true` when the symbol matches a Deribit option- or future-combo pattern.
+///
+/// A combo has an alphabetic strategy code in the second segment that is not
+/// `PERPETUAL` and does not look like a date (date segments start with a digit,
+/// e.g., `25MAR23`).
+fn is_combo_symbol(symbol: &str) -> bool {
+    let Some(seg) = second_segment(symbol) else {
+        return false;
+    };
+
+    if seg.is_empty() || seg == "PERPETUAL" {
+        return false;
+    }
+    // Combo strategy codes are alphabetic; date segments start with a digit.
+    seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && seg.chars().all(|c| c.is_ascii_alphabetic())
+}
+
 /// Extracts server timestamp from response and converts to UnixNanos.
 ///
 /// # Errors
@@ -113,7 +157,7 @@ pub fn extract_server_timestamp(us_out: Option<u64>) -> anyhow::Result<UnixNanos
 
 /// Parses a Deribit instrument into a Nautilus [`InstrumentAny`].
 ///
-/// Returns `Ok(None)` for unsupported instrument types (e.g., combos).
+/// Returns `Ok(None)` for unsupported instrument types.
 ///
 /// # Errors
 ///
@@ -139,13 +183,11 @@ pub fn parse_deribit_instrument_any(
         DeribitProductType::Option => {
             parse_option_instrument(instrument, ts_init, ts_event).map(Some)
         }
-        DeribitProductType::FutureCombo | DeribitProductType::OptionCombo => {
-            log::debug!(
-                "Skipping combo instrument: {} (kind={:?})",
-                instrument.instrument_name,
-                instrument.kind
-            );
-            Ok(None)
+        DeribitProductType::FutureCombo => {
+            parse_future_combo_instrument(instrument, ts_init, ts_event).map(Some)
+        }
+        DeribitProductType::OptionCombo => {
+            parse_option_combo_instrument(instrument, ts_init, ts_event).map(Some)
         }
     }
 }
@@ -192,6 +234,7 @@ fn parse_spot_instrument(
         Some(maker_fee),
         Some(taker_fee),
         None,
+        None,
         ts_event,
         ts_init,
     );
@@ -222,8 +265,7 @@ fn parse_perpetual_instrument(
     let size_increment = Quantity::from_decimal(instrument.min_trade_amount)?;
     let min_quantity = Quantity::from_decimal(instrument.min_trade_amount)?;
 
-    // Contract size represents the multiplier (e.g., 10 USD per contract for BTC-PERPETUAL)
-    let multiplier = Some(Quantity::from_decimal(instrument.contract_size)?);
+    let multiplier = Some(deribit_amount_quantity_multiplier());
     let lot_size = Some(size_increment);
 
     let maker_fee = Decimal::from_str(&instrument.maker_commission.to_string())
@@ -254,6 +296,7 @@ fn parse_perpetual_instrument(
         None, // margin_maint
         Some(maker_fee),
         Some(taker_fee),
+        None,
         None,
         ts_event,
         ts_init,
@@ -292,8 +335,7 @@ fn parse_future_instrument(
     let size_increment = Quantity::from_decimal(instrument.min_trade_amount)?;
     let min_quantity = Quantity::from_decimal(instrument.min_trade_amount)?;
 
-    // Contract size represents the multiplier
-    let multiplier = Some(Quantity::from_decimal(instrument.contract_size)?);
+    let multiplier = Some(deribit_amount_quantity_multiplier());
     let lot_size = Some(size_increment); // Use min_trade_amount as lot size
 
     let maker_fee = Decimal::from_str(&instrument.maker_commission.to_string())
@@ -326,6 +368,7 @@ fn parse_future_instrument(
         None, // margin_maint
         Some(maker_fee),
         Some(taker_fee),
+        None,
         None,
         ts_event,
         ts_init,
@@ -374,8 +417,7 @@ fn parse_option_instrument(
 
     let price_increment = Price::from_decimal(instrument.tick_size)?;
 
-    // Contract size is the multiplier (e.g., 1.0 for BTC options)
-    let multiplier = Quantity::from_decimal(instrument.contract_size)?;
+    let multiplier = deribit_amount_quantity_multiplier();
     let lot_size = Quantity::from_decimal(instrument.min_trade_amount)?;
     let min_trade_amount = Quantity::from_decimal(instrument.min_trade_amount)?;
 
@@ -412,11 +454,178 @@ fn parse_option_instrument(
         Some(maker_fee),
         Some(taker_fee),
         None,
+        None,
         ts_event,
         ts_init,
     );
 
     Ok(InstrumentAny::CryptoOption(option))
+}
+
+/// Parses a Deribit option combo into a [`CryptoOptionSpread`].
+fn parse_option_combo_instrument(
+    instrument: &DeribitInstrument,
+    ts_init: UnixNanos,
+    ts_event: UnixNanos,
+) -> anyhow::Result<InstrumentAny> {
+    let spread = build_spread_common(instrument, ts_init, ts_event)?;
+    let option_spread = CryptoOptionSpread::new(
+        spread.id,
+        spread.raw_symbol,
+        spread.underlying,
+        spread.quote_currency,
+        spread.settlement_currency,
+        spread.is_inverse,
+        spread.strategy_type,
+        spread.activation_ns,
+        spread.expiration_ns,
+        spread.price_precision,
+        spread.size_precision,
+        spread.price_increment,
+        spread.size_increment,
+        Some(spread.multiplier),
+        Some(spread.lot_size),
+        None,
+        Some(spread.size_increment),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(spread.maker_fee),
+        Some(spread.taker_fee),
+        None,
+        None,
+        ts_event,
+        ts_init,
+    );
+    Ok(InstrumentAny::CryptoOptionSpread(option_spread))
+}
+
+/// Parses a Deribit future combo into a [`CryptoFuturesSpread`].
+fn parse_future_combo_instrument(
+    instrument: &DeribitInstrument,
+    ts_init: UnixNanos,
+    ts_event: UnixNanos,
+) -> anyhow::Result<InstrumentAny> {
+    let spread = build_spread_common(instrument, ts_init, ts_event)?;
+    let futures_spread = CryptoFuturesSpread::new(
+        spread.id,
+        spread.raw_symbol,
+        spread.underlying,
+        spread.quote_currency,
+        spread.settlement_currency,
+        spread.is_inverse,
+        spread.strategy_type,
+        spread.activation_ns,
+        spread.expiration_ns,
+        spread.price_precision,
+        spread.size_precision,
+        spread.price_increment,
+        spread.size_increment,
+        Some(spread.multiplier),
+        Some(spread.lot_size),
+        None,
+        Some(spread.size_increment),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(spread.maker_fee),
+        Some(spread.taker_fee),
+        None,
+        None,
+        ts_event,
+        ts_init,
+    );
+    Ok(InstrumentAny::CryptoFuturesSpread(futures_spread))
+}
+
+/// Fields shared by [`CryptoOptionSpread`] and [`CryptoFuturesSpread`] construction
+/// from a Deribit combo instrument response.
+struct DeribitSpreadCommon {
+    id: InstrumentId,
+    raw_symbol: Symbol,
+    underlying: Currency,
+    quote_currency: Currency,
+    settlement_currency: Currency,
+    is_inverse: bool,
+    strategy_type: Ustr,
+    activation_ns: UnixNanos,
+    expiration_ns: UnixNanos,
+    price_precision: u8,
+    price_increment: Price,
+    size_precision: u8,
+    size_increment: Quantity,
+    multiplier: Quantity,
+    lot_size: Quantity,
+    maker_fee: Decimal,
+    taker_fee: Decimal,
+}
+
+fn build_spread_common(
+    instrument: &DeribitInstrument,
+    _ts_init: UnixNanos,
+    _ts_event: UnixNanos,
+) -> anyhow::Result<DeribitSpreadCommon> {
+    let id = InstrumentId::new(Symbol::new(instrument.instrument_name), *DERIBIT_VENUE);
+    let raw_symbol = Symbol::new(instrument.instrument_name);
+    let underlying = Currency::get_or_create_crypto(instrument.base_currency);
+    let quote_currency = Currency::get_or_create_crypto(instrument.quote_currency);
+    let settlement_currency = instrument
+        .settlement_currency
+        .map_or(underlying, Currency::get_or_create_crypto);
+    let is_inverse = instrument
+        .instrument_type
+        .as_ref()
+        .is_some_and(|t| t == "reversed");
+    let strategy_type = second_segment(instrument.instrument_name.as_str())
+        .map_or_else(|| Ustr::from("SPREAD"), Ustr::from);
+
+    let activation_ns = UnixNanos::from((instrument.creation_timestamp as u64) * 1_000_000);
+    let expiration_ns = UnixNanos::from(
+        instrument
+            .expiration_timestamp
+            .context("Missing expiration_timestamp for combo")? as u64
+            * 1_000_000,
+    );
+
+    let price_increment = Price::from_decimal(instrument.tick_size)?;
+    let size_increment = Quantity::from_decimal(instrument.min_trade_amount)?;
+    let multiplier = deribit_amount_quantity_multiplier();
+
+    let maker_fee = Decimal::from_str(&instrument.maker_commission.to_string())
+        .context("Failed to parse maker_commission")?;
+    let taker_fee = Decimal::from_str(&instrument.taker_commission.to_string())
+        .context("Failed to parse taker_commission")?;
+
+    Ok(DeribitSpreadCommon {
+        id,
+        raw_symbol,
+        underlying,
+        quote_currency,
+        settlement_currency,
+        is_inverse,
+        strategy_type,
+        activation_ns,
+        expiration_ns,
+        price_precision: price_increment.precision,
+        price_increment,
+        size_precision: size_increment.precision,
+        size_increment,
+        multiplier,
+        lot_size: size_increment,
+        maker_fee,
+        taker_fee,
+    })
+}
+
+fn deribit_amount_quantity_multiplier() -> Quantity {
+    // Deribit quantities use `amount`; `contract_size` converts amount to contract count
+    Quantity::from(1)
 }
 
 /// Parses Deribit account summaries into a Nautilus [`AccountState`].
@@ -491,7 +700,7 @@ pub fn parse_account_state(
     // Ensure at least one balance exists (Nautilus requires non-empty balances)
     if balances.is_empty() {
         let zero_currency = Currency::USD();
-        let zero_money = Money::new(0.0, zero_currency);
+        let zero_money = Money::zero(zero_currency);
         let zero_balance = AccountBalance::new(zero_money, zero_money, zero_money);
         balances.push(zero_balance);
     }
@@ -588,6 +797,36 @@ pub fn parse_portfolio_to_account_state(
     ))
 }
 
+/// Builds a [`TradeId`] for a Deribit public trade, prefixing the venue ID with
+/// the trade's provenance when applicable.
+///
+/// Strategies that need to distinguish RFQ-, block-, or combo-origin trades from
+/// plain trades can pattern-match the prefix on the resulting `TradeId`. The
+/// raw Deribit `trade_id` is preserved after the prefix so correlation back to
+/// the venue is straightforward via a prefix strip.
+///
+/// Precedence (most specific wins): `RFQ-` > `BLK-` > `COMBO-` > unprefixed.
+/// Block RFQs are themselves block trades on Deribit, so the `RFQ-` tag is the
+/// stronger signal; combo trades executed as blocks are tagged `BLK-` since
+/// the block flow is the more important reconciliation signal.
+#[must_use]
+pub fn build_public_trade_id(
+    trade_id: &str,
+    block_rfq_id: Option<i64>,
+    block_trade_id: Option<&str>,
+    combo_id: Option<&str>,
+) -> TradeId {
+    if block_rfq_id.is_some() {
+        TradeId::new(format!("RFQ-{trade_id}"))
+    } else if block_trade_id.is_some() {
+        TradeId::new(format!("BLK-{trade_id}"))
+    } else if combo_id.is_some() {
+        TradeId::new(format!("COMBO-{trade_id}"))
+    } else {
+        TradeId::new(trade_id)
+    }
+}
+
 // Parses a Deribit public trade into a Nautilus [`TradeTick`].
 ///
 /// # Errors
@@ -611,7 +850,12 @@ pub fn parse_trade_tick(
     let price = Price::from_decimal_dp(trade.price, price_precision)?;
     let size = Quantity::from_decimal_dp(trade.amount, size_precision)?;
     let ts_event = UnixNanos::from((trade.timestamp as u64) * NANOSECONDS_IN_MILLISECOND);
-    let trade_id = TradeId::new(&trade.trade_id);
+    let trade_id = build_public_trade_id(
+        &trade.trade_id,
+        trade.block_rfq_id,
+        trade.block_trade_id.as_deref(),
+        trade.combo_id.as_deref(),
+    );
 
     Ok(TradeTick::new(
         instrument_id,
@@ -624,10 +868,34 @@ pub fn parse_trade_tick(
     ))
 }
 
+/// Returns true when `Bar.volume` should be populated from the chart `cost` field (USD) instead
+/// of the `volume` field (base currency).
+///
+/// Deribit's `trades.{instrument}` channel reports each trade's `amount` in USD for inverse
+/// perpetuals and inverse futures, and in the underlying base currency for options and linear
+/// futures. To keep `Bar.volume` and `TradeTick.size` on a single unit per instrument, route
+/// inverse non-option products through `cost`. Options and option spreads stay on `volume` even
+/// when flagged `is_inverse`, because their trade `amount` is reported in base currency.
+///
+/// Reference: <https://docs.deribit.com/api-reference/market-data/public-get_last_trades_by_currency>
+#[must_use]
+pub fn use_cost_for_bar_volume(instrument: &InstrumentAny) -> bool {
+    if !instrument.is_inverse() {
+        return false;
+    }
+    !matches!(
+        instrument.instrument_class(),
+        InstrumentClass::Option | InstrumentClass::OptionSpread
+    )
+}
+
 /// Parses Deribit TradingView chart data into Nautilus [`Bar`]s.
 ///
 /// Converts OHLCV arrays from the `public/get_tradingview_chart_data` endpoint
 /// into a vector of [`Bar`] objects.
+///
+/// When `use_cost_for_volume` is true, `Bar.volume` is populated from `chart_data.cost` (USD)
+/// instead of `chart_data.volume` (base currency) — see [`use_cost_for_bar_volume`].
 ///
 /// # Errors
 ///
@@ -640,6 +908,7 @@ pub fn parse_bars(
     bar_type: BarType,
     price_precision: u8,
     size_precision: u8,
+    use_cost_for_volume: bool,
     ts_init: UnixNanos,
 ) -> anyhow::Result<Vec<Bar>> {
     // Check status
@@ -658,7 +927,8 @@ pub fn parse_bars(
             && chart_data.high.len() == num_bars
             && chart_data.low.len() == num_bars
             && chart_data.close.len() == num_bars
-            && chart_data.volume.len() == num_bars,
+            && chart_data.volume.len() == num_bars
+            && chart_data.cost.len() == num_bars,
         "Inconsistent array lengths in chart data"
     );
 
@@ -677,7 +947,12 @@ pub fn parse_bars(
             .with_context(|| format!("Invalid low price at index {i}"))?;
         let close = Price::new_checked(chart_data.close[i], price_precision)
             .with_context(|| format!("Invalid close price at index {i}"))?;
-        let volume = Quantity::new_checked(chart_data.volume[i], size_precision)
+        let raw_volume = if use_cost_for_volume {
+            chart_data.cost[i]
+        } else {
+            chart_data.volume[i]
+        };
+        let volume = Quantity::new_checked(raw_volume, size_precision)
             .with_context(|| format!("Invalid volume at index {i}"))?;
 
         // Convert timestamp from milliseconds to nanoseconds
@@ -785,7 +1060,7 @@ pub fn bar_spec_to_resolution(bar_type: &BarType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::instruments::Instrument;
+    use nautilus_model::{instruments::Instrument, types::Money};
     use rstest::rstest;
     use rust_decimal_macros::dec;
 
@@ -822,7 +1097,23 @@ mod tests {
         assert_eq!(perpetual.size_precision(), 0);
         assert_eq!(perpetual.price_increment(), Price::from("0.5"));
         assert_eq!(perpetual.size_increment(), Quantity::from("10"));
-        assert_eq!(perpetual.multiplier(), Quantity::from("10"));
+        assert_eq!(perpetual.multiplier(), Quantity::from("1"));
+        assert_eq!(
+            perpetual.calculate_notional_value(
+                Quantity::from("10"),
+                Price::from("50000"),
+                Some(false)
+            ),
+            Money::from("0.0002 BTC")
+        );
+        assert_eq!(
+            perpetual.calculate_notional_value(
+                Quantity::from("10"),
+                Price::from("50000"),
+                Some(true)
+            ),
+            Money::from("10 USD")
+        );
         assert_eq!(perpetual.lot_size(), Some(Quantity::from("10")));
         assert_eq!(perpetual.maker_fee(), dec!(0));
         assert_eq!(perpetual.taker_fee(), dec!(0.0005));
@@ -869,7 +1160,7 @@ mod tests {
         assert_eq!(future.size_precision(), 0);
         assert_eq!(future.price_increment(), Price::from("0.5"));
         assert_eq!(future.size_increment(), Quantity::from("10"));
-        assert_eq!(future.multiplier(), Quantity::from("10"));
+        assert_eq!(future.multiplier(), Quantity::from("1"));
         assert_eq!(future.lot_size(), Some(Quantity::from("10")));
         assert_eq!(future.maker_fee, dec!(0));
         assert_eq!(future.taker_fee, dec!(0.0005));
@@ -1124,8 +1415,98 @@ mod tests {
         assert_eq!(trade.trade_id, TradeId::new("ETH-284830854"));
     }
 
+    /// Builds a minimal [`DeribitPublicTrade`] via JSON to exercise the HTTP
+    /// trade-tick path. Mirrors the WS-side `make_trade_msg` helper.
+    fn make_public_trade(
+        trade_id: &str,
+        block_trade_id: Option<&str>,
+        block_rfq_id: Option<i64>,
+        combo_id: Option<&str>,
+    ) -> DeribitPublicTrade {
+        let raw = serde_json::json!({
+            "trade_id": trade_id,
+            "instrument_name": "BTC-PERPETUAL",
+            "price": 77000.0,
+            "amount": 10.0,
+            "direction": "buy",
+            "timestamp": 1_779_107_386_210_i64,
+            "trade_seq": 1,
+            "tick_direction": 0,
+            "block_trade_id": block_trade_id,
+            "block_rfq_id": block_rfq_id,
+            "combo_id": combo_id,
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
     #[rstest]
-    fn test_parse_bars() {
+    #[case::block_rfq(None, Some(99_i64), None, "RFQ-244343055")]
+    #[case::block_trade(Some("12345"), None, None, "BLK-244343055")]
+    #[case::combo_leg(None, None, Some("BTC-FS-25DEC26_PERP"), "COMBO-244343055")]
+    fn test_parse_trade_tick_provenance_prefix(
+        #[case] block_trade_id: Option<&str>,
+        #[case] block_rfq_id: Option<i64>,
+        #[case] combo_id: Option<&str>,
+        #[case] expected_trade_id: &str,
+    ) {
+        let trade = make_public_trade("244343055", block_trade_id, block_rfq_id, combo_id);
+        let instrument_id = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
+        let tick = parse_trade_tick(&trade, instrument_id, 1, 0, UnixNanos::default())
+            .expect("Should parse trade tick");
+        assert_eq!(tick.trade_id, TradeId::new(expected_trade_id));
+    }
+
+    #[rstest]
+    fn test_use_cost_for_bar_volume() {
+        // Inverse perpetual: BTC-PERPETUAL → cost (USD)
+        let perp_json = load_test_json("http_get_instrument.json");
+        let perp_response: DeribitJsonRpcResponse<DeribitInstrument> =
+            serde_json::from_str(&perp_json).unwrap();
+        let perp_inst = perp_response.result.expect("Test data must have result");
+        let perp =
+            parse_deribit_instrument_any(&perp_inst, UnixNanos::default(), UnixNanos::default())
+                .unwrap()
+                .expect("Should parse perpetual");
+        assert!(perp.is_inverse());
+        assert!(use_cost_for_bar_volume(&perp));
+
+        // BTC inverse option: is_inverse, but trade amount is in BTC, so stay on volume
+        let instruments_json = load_test_json("http_get_instruments.json");
+        let instruments_response: DeribitJsonRpcResponse<Vec<DeribitInstrument>> =
+            serde_json::from_str(&instruments_json).unwrap();
+        let instruments = instruments_response
+            .result
+            .expect("Test data must have result");
+
+        let option_inst = instruments
+            .iter()
+            .find(|i| i.instrument_name.as_str() == "BTC-27DEC24-100000-C")
+            .expect("Test data must contain BTC-27DEC24-100000-C");
+        let option =
+            parse_deribit_instrument_any(option_inst, UnixNanos::default(), UnixNanos::default())
+                .unwrap()
+                .expect("Should parse option");
+        assert!(option.is_inverse());
+        assert!(
+            !use_cost_for_bar_volume(&option),
+            "options report trade amount in base currency, must keep using volume",
+        );
+
+        // Inverse future: same convention as perp — cost (USD)
+        let future_inst = instruments
+            .iter()
+            .find(|i| i.instrument_name.as_str() == "BTC-27DEC24")
+            .expect("Test data must contain BTC-27DEC24");
+        let future =
+            parse_deribit_instrument_any(future_inst, UnixNanos::default(), UnixNanos::default())
+                .unwrap()
+                .expect("Should parse future");
+        assert!(future.is_inverse());
+        assert!(use_cost_for_bar_volume(&future));
+    }
+
+    #[rstest]
+    fn test_parse_bars_uses_volume_field() {
         let json_data = load_test_json("http_get_tradingview_chart_data.json");
         let response: DeribitJsonRpcResponse<DeribitTradingViewChartData> =
             serde_json::from_str(&json_data).unwrap();
@@ -1134,7 +1515,8 @@ mod tests {
         let bar_type = BarType::from("BTC-PERPETUAL.DERIBIT-1-MINUTE-LAST-EXTERNAL");
         let ts_init = UnixNanos::from(1766487086146245_u64 * NANOSECONDS_IN_MICROSECOND);
 
-        let bars = parse_bars(&chart_data, bar_type, 1, 8, ts_init).expect("Should parse bars");
+        let bars =
+            parse_bars(&chart_data, bar_type, 1, 8, false, ts_init).expect("Should parse bars");
 
         assert_eq!(bars.len(), 5, "Should parse 5 bars");
 
@@ -1163,6 +1545,24 @@ mod tests {
             last_bar.ts_event,
             UnixNanos::from(1766483700000_u64 * NANOSECONDS_IN_MILLISECOND)
         );
+    }
+
+    #[rstest]
+    fn test_parse_bars_cost_path() {
+        let json_data = load_test_json("http_get_tradingview_chart_data.json");
+        let response: DeribitJsonRpcResponse<DeribitTradingViewChartData> =
+            serde_json::from_str(&json_data).unwrap();
+        let chart_data = response.result.expect("Test data must have result");
+
+        let bar_type = BarType::from("BTC-PERPETUAL.DERIBIT-1-MINUTE-LAST-EXTERNAL");
+        let ts_init = UnixNanos::from(1766487086146245_u64 * NANOSECONDS_IN_MICROSECOND);
+
+        // Cost path picks `cost` (USD), matching trade `amount` on inverse perps/futures.
+        let bars =
+            parse_bars(&chart_data, bar_type, 1, 0, true, ts_init).expect("Should parse bars");
+        assert_eq!(bars.len(), 5);
+        assert_eq!(bars[0].volume, Quantity::from("257490"));
+        assert_eq!(bars[4].volume, Quantity::from("8910"));
     }
 
     #[rstest]
@@ -1326,6 +1726,335 @@ mod tests {
                 "currency mismatch for {symbol}"
             );
         }
+    }
+
+    #[rstest]
+    // Future combos: {CURRENCY}-FS-...
+    #[case::future_combo_vs_perp("BTC-FS-19MAY26_PERP", "future_combo", "BTC")]
+    #[case::future_combo_inter_month("BTC-FS-22MAY26_19MAY26", "future_combo", "BTC")]
+    #[case::future_combo_eth("ETH-FS-26JUN26_PERP", "future_combo", "ETH")]
+    // Option combos: {CURRENCY}-{STRATEGY}-...
+    #[case::option_combo_call_spread("BTC-CS-19MAY26-70000_75000", "option_combo", "BTC")]
+    #[case::option_combo_strangle("BTC-STRG-19MAY26-74000_79000", "option_combo", "BTC")]
+    #[case::option_combo_straddle("BTC-STRD-29MAY26-77000", "option_combo", "BTC")]
+    #[case::option_combo_box("BTC-BOX-25DEC26-58000_60000", "option_combo", "BTC")]
+    #[case::option_combo_put_spread_eth("ETH-PS-26JUN26-3500_4000", "option_combo", "ETH")]
+    fn test_parse_combo_kinds(
+        #[case] symbol: &str,
+        #[case] expected_kind: &str,
+        #[case] expected_currency: &str,
+    ) {
+        let (kind, currency) = parse_instrument_kind_currency(&make_instrument_id(symbol));
+        assert_eq!(kind, expected_kind, "kind mismatch for {symbol}");
+        assert_eq!(
+            currency, expected_currency,
+            "currency mismatch for {symbol}"
+        );
+    }
+
+    #[rstest]
+    fn test_parse_option_combo_instrument() {
+        let json_data = load_test_json("http_get_instruments_option_combo.json");
+        let response: DeribitJsonRpcResponse<Vec<DeribitInstrument>> =
+            serde_json::from_str(&json_data).unwrap();
+        let instruments = response.result.expect("Test data must have result");
+        let raw = instruments
+            .iter()
+            .find(|i| i.instrument_name.as_str() == "BTC-STRG-19MAY26-74000_79000")
+            .expect("fixture must contain BTC-STRG-19MAY26-74000_79000");
+
+        let any = parse_deribit_instrument_any(raw, UnixNanos::default(), UnixNanos::default())
+            .unwrap()
+            .expect("Should parse option combo");
+
+        let InstrumentAny::CryptoOptionSpread(spread) = any else {
+            panic!("Expected CryptoOptionSpread, was {any:?}");
+        };
+        assert_eq!(
+            spread.id,
+            InstrumentId::from("BTC-STRG-19MAY26-74000_79000.DERIBIT")
+        );
+        assert_eq!(spread.underlying.code.as_str(), "BTC");
+        assert_eq!(spread.strategy_type.as_str(), "STRG");
+        assert_eq!(spread.quote_currency.code.as_str(), "BTC");
+        assert_eq!(spread.settlement_currency.code.as_str(), "BTC");
+        assert!(spread.is_inverse);
+        assert_eq!(spread.price_precision, 4);
+        assert_eq!(spread.price_increment, Price::from("0.0001"));
+        assert_eq!(spread.size_precision, 1);
+        assert_eq!(spread.size_increment, Quantity::from("0.1"));
+        assert_eq!(spread.multiplier, Quantity::from("1"));
+        assert_eq!(spread.lot_size, Quantity::from("0.1"));
+        assert_eq!(
+            spread.expiration_ns,
+            UnixNanos::from(1779177600000_u64 * 1_000_000)
+        );
+        assert_eq!(
+            spread.activation_ns,
+            UnixNanos::from(1779100724000_u64 * 1_000_000)
+        );
+        assert_eq!(spread.maker_fee, dec!(0));
+        assert_eq!(spread.taker_fee, dec!(0));
+    }
+
+    #[rstest]
+    fn test_deserialize_option_combo_trade_with_legs() {
+        let json_data = load_test_json("http_get_last_trades_option_combo.json");
+        let response: DeribitJsonRpcResponse<DeribitTradesResponse> =
+            serde_json::from_str(&json_data).unwrap();
+        let result = response.result.expect("Test data must have result");
+
+        let combo_trade = &result.trades[0];
+        assert_eq!(combo_trade.trade_id, "244365193");
+        assert_eq!(combo_trade.instrument_name, "BTC-CS-19MAY26-70000_75000");
+        assert_eq!(combo_trade.combo_id.as_deref(), None);
+        assert_eq!(combo_trade.combo_trade_id.as_deref(), None);
+
+        let legs = combo_trade
+            .legs
+            .as_ref()
+            .expect("Combo trade must have legs");
+        assert_eq!(legs.len(), 2);
+
+        let leg_75c = &legs[0];
+        assert_eq!(leg_75c.instrument_name, "BTC-19MAY26-75000-C");
+        assert_eq!(leg_75c.trade_id, "244365195");
+        assert_eq!(leg_75c.combo_trade_id, "244365193");
+        assert_eq!(leg_75c.combo_id, "BTC-CS-19MAY26-70000_75000");
+        assert_eq!(leg_75c.direction, "buy");
+        assert_eq!(leg_75c.price, dec!(0.0174));
+        assert_eq!(leg_75c.amount, dec!(0.1));
+        assert_eq!(leg_75c.iv, Some(dec!(41.01)));
+
+        let leg_70c = &legs[1];
+        assert_eq!(leg_70c.instrument_name, "BTC-19MAY26-70000-C");
+        assert_eq!(leg_70c.trade_id, "244365194");
+        assert_eq!(leg_70c.direction, "sell");
+        assert_eq!(leg_70c.iv, Some(dec!(83.39)));
+    }
+
+    #[rstest]
+    fn test_deserialize_future_combo_trade_with_legs() {
+        let json_data = load_test_json("http_get_last_trades_future_combo.json");
+        let response: DeribitJsonRpcResponse<DeribitTradesResponse> =
+            serde_json::from_str(&json_data).unwrap();
+        let result = response.result.expect("Test data must have result");
+
+        let combo_trade = &result.trades[0];
+        assert_eq!(combo_trade.trade_id, "244343053");
+        assert_eq!(combo_trade.instrument_name, "BTC-FS-25DEC26_PERP");
+        assert_eq!(combo_trade.price, dec!(1320.0));
+        assert_eq!(combo_trade.amount, dec!(10.0));
+
+        let legs = combo_trade
+            .legs
+            .as_ref()
+            .expect("Future combo trade must have legs");
+        assert_eq!(legs.len(), 2);
+
+        // Leg 1: BTC-25DEC26 sell. Exact field values rather than is_empty.
+        let leg_25dec = &legs[0];
+        assert_eq!(leg_25dec.instrument_name, "BTC-25DEC26");
+        assert_eq!(leg_25dec.trade_id, "244343055");
+        assert_eq!(leg_25dec.combo_id, "BTC-FS-25DEC26_PERP");
+        assert_eq!(leg_25dec.combo_trade_id, "244343053");
+        assert_eq!(leg_25dec.direction, "sell");
+        assert_eq!(leg_25dec.price, dec!(78624.0));
+        assert_eq!(leg_25dec.amount, dec!(10.0));
+        assert_eq!(leg_25dec.contracts, Some(dec!(1.0)));
+        assert!(leg_25dec.iv.is_none(), "future leg must not carry iv");
+
+        // Leg 2: BTC-PERPETUAL buy.
+        let leg_perp = &legs[1];
+        assert_eq!(leg_perp.instrument_name, "BTC-PERPETUAL");
+        assert_eq!(leg_perp.trade_id, "244343054");
+        assert_eq!(leg_perp.combo_id, "BTC-FS-25DEC26_PERP");
+        assert_eq!(leg_perp.combo_trade_id, "244343053");
+        assert_eq!(leg_perp.direction, "buy");
+        assert_eq!(leg_perp.price, dec!(77304.0));
+        assert!(leg_perp.iv.is_none(), "future leg must not carry iv");
+    }
+
+    #[rstest]
+    fn test_deserialize_historical_combo_leg_with_missing_optional_fields() {
+        // Pins the review-fix loop's optionality decisions on DeribitTradeLeg.
+        // Synthesised fixture: one combo trade where the parent omits
+        // contracts/index_price/mark_price (already optional pre-patch), and
+        // legs omit varying subsets of the same Option<Decimal> fields plus
+        // `iv`. A regression that re-tightens any of them will fail here.
+        let json_data = load_test_json("http_get_last_trades_historical_combo.json");
+        let response: DeribitJsonRpcResponse<DeribitTradesResponse> =
+            serde_json::from_str(&json_data).unwrap();
+        let result = response.result.expect("Test data must have result");
+
+        let combo_trade = &result.trades[0];
+        assert_eq!(combo_trade.trade_id, "999000000");
+        assert_eq!(combo_trade.instrument_name, "BTC-CS-19MAY26-70000_75000");
+        // Parent-level optional fields all absent on this historical sample.
+        assert!(combo_trade.contracts.is_none());
+        assert!(combo_trade.index_price.is_none());
+        assert!(combo_trade.mark_price.is_none());
+
+        let legs = combo_trade
+            .legs
+            .as_ref()
+            .expect("Combo trade must have legs");
+        assert_eq!(legs.len(), 2);
+
+        // Leg 1: every Option<Decimal> field absent (contracts, index_price,
+        // mark_price, iv). Required fields still strong-asserted.
+        let leg1 = &legs[0];
+        assert_eq!(leg1.instrument_name, "BTC-19MAY26-75000-C");
+        assert_eq!(leg1.trade_id, "999000001");
+        assert_eq!(leg1.combo_id, "BTC-CS-19MAY26-70000_75000");
+        assert_eq!(leg1.combo_trade_id, "999000000");
+        assert_eq!(leg1.direction, "buy");
+        assert_eq!(leg1.price, dec!(0.0174));
+        assert_eq!(leg1.amount, dec!(0.1));
+        assert!(leg1.contracts.is_none());
+        assert!(leg1.index_price.is_none());
+        assert!(leg1.mark_price.is_none());
+        assert!(leg1.iv.is_none());
+
+        // Leg 2: contracts and mark_price absent; iv and index_price present.
+        // Confirms the optional fields are independently parsed.
+        let leg2 = &legs[1];
+        assert_eq!(leg2.instrument_name, "BTC-19MAY26-70000-C");
+        assert_eq!(leg2.trade_id, "999000002");
+        assert!(leg2.contracts.is_none());
+        assert!(leg2.mark_price.is_none());
+        assert_eq!(leg2.index_price, Some(dec!(76185.14)));
+        assert_eq!(leg2.iv, Some(dec!(83.39)));
+    }
+
+    #[rstest]
+    fn test_parse_combo_instrument_missing_expiration_errors() {
+        // Locks invariant I9: build_spread_common must reject combo
+        // instruments without an expiration_timestamp rather than producing a
+        // zero-expiration InstrumentAny.
+        let json_data = load_test_json("http_get_instruments_option_combo.json");
+        let response: DeribitJsonRpcResponse<Vec<DeribitInstrument>> =
+            serde_json::from_str(&json_data).unwrap();
+        let mut instruments = response.result.expect("Test data must have result");
+        let raw = instruments
+            .iter_mut()
+            .find(|i| i.instrument_name.as_str() == "BTC-STRG-19MAY26-74000_79000")
+            .expect("fixture must contain BTC-STRG-19MAY26-74000_79000");
+        raw.expiration_timestamp = None;
+
+        let result = parse_deribit_instrument_any(raw, UnixNanos::default(), UnixNanos::default());
+        let err = result.expect_err("Should error when expiration_timestamp is missing");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Missing expiration_timestamp for combo"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[rstest]
+    fn test_deserialize_perpetual_combo_leg_tags() {
+        // Per-leg stream carries combo_id + combo_trade_id when the leg
+        // originated from a combo (gating evidence from Step 1).
+        let json_data = load_test_json("http_get_last_trades_perpetual_with_combo_tags.json");
+        let response: DeribitJsonRpcResponse<DeribitTradesResponse> =
+            serde_json::from_str(&json_data).unwrap();
+        let result = response.result.expect("Test data must have result");
+
+        for trade in &result.trades {
+            assert_eq!(trade.instrument_name, "BTC-PERPETUAL");
+            assert_eq!(trade.combo_id.as_deref(), Some("BTC-FS-25DEC26_PERP"));
+            assert!(
+                trade.combo_trade_id.is_some(),
+                "Per-leg trade should carry combo_trade_id"
+            );
+            // Per-leg stream entries never carry a nested `legs` array.
+            assert!(trade.legs.is_none());
+        }
+    }
+
+    #[rstest]
+    fn test_parse_future_combo_instrument() {
+        let json_data = load_test_json("http_get_instruments_future_combo.json");
+        let response: DeribitJsonRpcResponse<Vec<DeribitInstrument>> =
+            serde_json::from_str(&json_data).unwrap();
+        let instruments = response.result.expect("Test data must have result");
+        let raw = instruments
+            .iter()
+            .find(|i| i.instrument_name.as_str() == "BTC-FS-19MAY26_PERP")
+            .expect("fixture must contain BTC-FS-19MAY26_PERP");
+
+        let any = parse_deribit_instrument_any(raw, UnixNanos::default(), UnixNanos::default())
+            .unwrap()
+            .expect("Should parse future combo");
+
+        let InstrumentAny::CryptoFuturesSpread(spread) = any else {
+            panic!("Expected CryptoFuturesSpread, was {any:?}");
+        };
+        assert_eq!(spread.id, InstrumentId::from("BTC-FS-19MAY26_PERP.DERIBIT"));
+        assert_eq!(spread.underlying.code.as_str(), "BTC");
+        assert_eq!(spread.strategy_type.as_str(), "FS");
+        // Future combo quote_currency on BTC contracts is USD.
+        assert_eq!(spread.quote_currency.code.as_str(), "USD");
+        assert_eq!(spread.settlement_currency.code.as_str(), "BTC");
+        assert!(spread.is_inverse);
+        assert_eq!(spread.price_precision, 1);
+        assert_eq!(spread.price_increment, Price::from("0.5"));
+        assert_eq!(spread.size_precision, 0);
+        assert_eq!(spread.size_increment, Quantity::from("10"));
+        assert_eq!(spread.multiplier, Quantity::from("1"));
+        assert_eq!(spread.lot_size, Quantity::from("10"));
+        assert_eq!(
+            spread.expiration_ns,
+            UnixNanos::from(1779177600000_u64 * 1_000_000)
+        );
+    }
+
+    #[rstest]
+    fn test_build_public_trade_id_plain() {
+        let id = build_public_trade_id("244343053", None, None, None);
+        assert_eq!(id.as_str(), "244343053");
+    }
+
+    #[rstest]
+    fn test_build_public_trade_id_combo_only() {
+        let id = build_public_trade_id("244365195", None, None, Some("BTC-CS-19MAY26-70000_75000"));
+        assert_eq!(id.as_str(), "COMBO-244365195");
+    }
+
+    #[rstest]
+    fn test_build_public_trade_id_block_only() {
+        let id = build_public_trade_id("244343053", None, Some("12345"), None);
+        assert_eq!(id.as_str(), "BLK-244343053");
+    }
+
+    #[rstest]
+    fn test_build_public_trade_id_rfq_only() {
+        let id = build_public_trade_id("244343053", Some(99), None, None);
+        assert_eq!(id.as_str(), "RFQ-244343053");
+    }
+
+    #[rstest]
+    fn test_build_public_trade_id_precedence_block_beats_combo() {
+        // A combo executed as a block carries both combo_id and block_trade_id.
+        // The block tag wins because it is the more important reconciliation signal.
+        let id = build_public_trade_id(
+            "244343053",
+            None,
+            Some("12345"),
+            Some("BTC-FS-25DEC26_PERP"),
+        );
+        assert_eq!(id.as_str(), "BLK-244343053");
+    }
+
+    #[rstest]
+    fn test_build_public_trade_id_precedence_rfq_beats_all() {
+        let id = build_public_trade_id(
+            "244343053",
+            Some(99),
+            Some("12345"),
+            Some("BTC-FS-25DEC26_PERP"),
+        );
+        assert_eq!(id.as_str(), "RFQ-244343053");
     }
 
     #[rstest]

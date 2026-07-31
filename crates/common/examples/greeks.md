@@ -4,7 +4,9 @@ This document explains how to use the `GreeksCalculator` with the Nautilus actor
 
 ## Overview
 
-The `GreeksCalculator` is a utility for calculating option and futures greeks (sensitivities of price moves with respect to market data moves). It has been integrated with the actor system to allow for easy use within actors, including strategies.
+The `GreeksCalculator` is a utility for calculating option and futures greeks: sensitivities of
+price moves with respect to market data moves. It integrates with the actor system for use within
+actors, including strategies.
 
 ## Key Components
 
@@ -16,44 +18,24 @@ The `GreeksCalculator` is a utility for calculating option and futures greeks (s
 ### Basic Setup
 
 ```rust
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
-
 use nautilus_common::{
     actor::{
         data_actor::{DataActor, DataActorConfig, DataActorCore},
         Actor,
     },
-    cache::Cache,
-    greeks::GreeksCalculator,
-    live::clock::LiveClock,
-    msgbus::MessagingSwitchboard,
+    greeks::{GreeksCalculator, InstrumentGreeksParams},
 };
 
 struct MyActor {
     core: DataActorCore,
-    greeks_calculator: GreeksCalculator,
+    greeks_calculator: Option<GreeksCalculator>,
 }
 
 impl MyActor {
-    pub fn new(
-        config: DataActorConfig,
-        cache: Rc<RefCell<Cache>>,
-        clock: Rc<RefCell<LiveClock>>,
-        switchboard: Arc<MessagingSwitchboard>,
-    ) -> Self {
-        let core = DataActorCore::new(config, cache.clone(), clock.clone(), switchboard.clone());
-
-        // Create the GreeksCalculator with the same clock and cache
-        let greeks_calculator = GreeksCalculator::new(
-            cache,
-            clock,
-        );
-
+    pub fn new(config: DataActorConfig) -> Self {
         Self {
-            core,
-            greeks_calculator,
+            core: DataActorCore::new(config),
+            greeks_calculator: None,
         }
     }
 }
@@ -63,46 +45,27 @@ impl MyActor {
 
 ```rust
 use nautilus_model::{
-    data::greeks::GreeksData,
+    data::{CustomData, greeks::GreeksData},
     identifiers::InstrumentId,
 };
 
 impl MyActor {
     pub fn calculate_greeks(&self, instrument_id: InstrumentId) -> anyhow::Result<GreeksData> {
-        // Example parameters
-        let flat_interest_rate = 0.0425;
-        let flat_dividend_yield = None;
-        let spot_shock = 0.0;
-        let vol_shock = 0.0;
-        let time_to_expiry_shock = 0.0;
-        let use_cached_greeks = false;
-        let update_vol = false;
-        let cache_greeks = true;
-        let publish_greeks = true;
-        let ts_event = self.core.clock.borrow().timestamp_ns();
-        let position = None;
-        let percent_greeks = false;
-        let index_instrument_id = None;
-        let beta_weights = None;
+        InstrumentGreeksParams::builder()
+            .instrument_id(instrument_id)
+            .cache_greeks(true)
+            .publish_greeks(true)
+            .ts_event(self.clock().timestamp_ns())
+            .build()
+            .calculate(self.calculator()?)
+    }
 
-        // Calculate greeks
-        self.greeks_calculator.instrument_greeks(
-            instrument_id,
-            Some(flat_interest_rate),
-            flat_dividend_yield,
-            Some(spot_shock),
-            Some(vol_shock),
-            Some(time_to_expiry_shock),
-            Some(use_cached_greeks),
-            Some(update_vol),
-            Some(cache_greeks),
-            Some(publish_greeks),
-            Some(ts_event),
-            position,
-            Some(percent_greeks),
-            index_instrument_id,
-            beta_weights,
-        )
+    fn calculator(&self) -> anyhow::Result<&GreeksCalculator> {
+        let Some(calculator) = &self.greeks_calculator else {
+            anyhow::bail!("MyActor must be started before calculating greeks");
+        };
+
+        Ok(calculator)
     }
 }
 ```
@@ -111,24 +74,27 @@ impl MyActor {
 
 ```rust
 impl MyActor {
-    pub fn subscribe_to_greeks(&self, underlying: &str) {
-        // Subscribe to greeks data
-        self.greeks_calculator.subscribe_greeks(underlying, None);
+    pub fn subscribe_to_greeks(&mut self, underlying: &str) -> anyhow::Result<()> {
+        self.calculator()?
+            .subscribe_greeks(underlying, Some(Self::handle_greeks as fn(&GreeksData)));
+        Ok(())
+    }
+
+    fn handle_greeks(greeks: &GreeksData) {
+        println!("Received greeks data: {greeks:?}");
     }
 }
 
 impl DataActor for MyActor {
     fn on_start(&mut self) -> anyhow::Result<()> {
+        self.greeks_calculator = Some(GreeksCalculator::from_actor(self));
+
         // Subscribe to greeks data for SPY
-        self.subscribe_to_greeks("SPY");
-        Ok(())
+        self.subscribe_to_greeks("SPY")
     }
 
-    fn on_data(&mut self, data: &dyn std::any::Any) -> anyhow::Result<()> {
-        // Handle received data
-        if let Some(greeks_data) = data.downcast_ref::<GreeksData>() {
-            println!("Received greeks data: {:?}", greeks_data);
-        }
+    fn on_data(&mut self, data: &CustomData) -> anyhow::Result<()> {
+        println!("Received custom data: {}", data.data_type);
         Ok(())
     }
 }
@@ -136,16 +102,22 @@ impl DataActor for MyActor {
 
 ## Full Example
 
-See the complete example in `crates/common/examples/greeks_actor_example.rs` for a working implementation.
+See the complete example in `crates/common/examples/greeks_actor_example.rs` for a working
+implementation.
 
 ## Key Features
 
-1. **Integration with Actor System**: The `GreeksCalculator` uses the same clock and message bus as the actor system.
+1. **Integration with Actor System**: The `GreeksCalculator` uses the same clock and message bus
+   as the actor system.
 2. **Message Bus Integration**: Greeks data can be published and subscribed to via the message bus.
 3. **Caching**: Greeks calculations can be cached for performance.
 4. **Portfolio Greeks**: Calculate greeks for an entire portfolio of positions.
 
 ## Notes
 
-- When setting `publish_greeks` to `true`, the calculator will publish the greeks data to the message bus with a topic format of `data.GreeksData.instrument_id={symbol}`.
-- When subscribing to greeks data, you can provide a custom handler or use the default handler which caches the received greeks data.
+- When setting `publish_greeks` to `true`, the calculator publishes typed `GreeksData` to the
+  message bus with a topic format of `data.GreeksData.instrument_id={symbol}`.
+- Greeks subscriptions are handled through `subscribe_greeks`; `DataActor::on_data` receives
+  `CustomData` wrappers and is not the greeks delivery path.
+- When subscribing to greeks data, you can provide a custom handler or use the default handler
+  which caches the received greeks data.

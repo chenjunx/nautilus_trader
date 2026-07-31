@@ -132,13 +132,14 @@ impl IdsGenerator {
         } else {
             // Netting OMS (position id will be derived from instrument and strategy)
             let cache = self.cache.as_ref().borrow();
-            let positions_open =
-                cache.positions_open(None, Some(&order.instrument_id()), None, None, None);
-            if positions_open.is_empty() {
-                None
-            } else {
-                Some(positions_open[0].id)
-            }
+            let positions_open = cache.positions_open(
+                None,
+                Some(&order.instrument_id()),
+                Some(&order.strategy_id()),
+                None,
+                None,
+            );
+            positions_open.first().map(|position| position.id)
         }
     }
 
@@ -207,12 +208,13 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::cache::Cache;
-    use nautilus_core::{UUID4, UnixNanos};
+    use nautilus_core::UnixNanos;
     use nautilus_model::{
-        enums::{LiquiditySide, OmsType, OrderSide, OrderType},
-        events::OrderFilled,
+        enums::{OmsType, OrderSide, OrderType},
+        events::{OrderFilled, order::spec::OrderFilledSpec},
         identifiers::{
-            AccountId, ClientOrderId, PositionId, TradeId, Venue, VenueOrderId, stubs::account_id,
+            AccountId, ClientOrderId, PositionId, StrategyId, Venue, VenueOrderId,
+            stubs::account_id,
         },
         instruments::{
             CryptoPerpetual, Instrument, InstrumentAny, stubs::crypto_perpetual_ethusdt,
@@ -258,27 +260,18 @@ mod tests {
         account_id: AccountId,
         market_order_buy: OrderAny,
     ) -> OrderFilled {
-        OrderFilled::new(
-            market_order_buy.trader_id(),
-            market_order_buy.strategy_id(),
-            market_order_buy.instrument_id(),
-            market_order_buy.client_order_id(),
-            VenueOrderId::new("BINANCE-1"),
-            account_id,
-            TradeId::new("1"),
-            market_order_buy.order_side(),
-            market_order_buy.order_type(),
-            Quantity::from("1"),
-            Price::from("1000.000"),
-            instrument_eth_usdt.quote_currency(),
-            LiquiditySide::Taker,
-            UUID4::new(),
-            UnixNanos::default(),
-            UnixNanos::default(),
-            false,
-            Some(PositionId::new("P-1")),
-            None,
-        )
+        OrderFilledSpec::builder()
+            .trader_id(market_order_buy.trader_id())
+            .strategy_id(market_order_buy.strategy_id())
+            .instrument_id(market_order_buy.instrument_id())
+            .client_order_id(market_order_buy.client_order_id())
+            .venue_order_id(VenueOrderId::new("BINANCE-1"))
+            .account_id(account_id)
+            .last_qty(Quantity::from("1"))
+            .last_px(Price::from("1000.000"))
+            .currency(instrument_eth_usdt.quote_currency())
+            .position_id(PositionId::new("P-1"))
+            .build()
     }
 
     fn get_ids_generator(
@@ -350,6 +343,33 @@ mod tests {
         // position id should be returned for the existing position
         let position_id = ids_generator.get_position_id(&market_order_buy, None);
         assert_eq!(position_id, Some(position.id));
+    }
+
+    #[rstest]
+    fn test_get_position_id_netting_filters_by_strategy(
+        instrument_eth_usdt: InstrumentAny,
+        market_order_fill: OrderFilled,
+    ) {
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let mut ids_generator = get_ids_generator(cache.clone(), false, OmsType::Netting);
+        let position = Position::new(&instrument_eth_usdt, market_order_fill);
+        cache
+            .as_ref()
+            .borrow_mut()
+            .add_position(&position, OmsType::Netting)
+            .unwrap();
+
+        let order_for_other_strategy = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(instrument_eth_usdt.id())
+            .strategy_id(StrategyId::from("S-002"))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from("1.000"))
+            .client_order_id(ClientOrderId::from("O-19700101-000000-001-001-9"))
+            .submit(true)
+            .build();
+
+        let position_id = ids_generator.get_position_id(&order_for_other_strategy, None);
+        assert_eq!(position_id, None);
     }
 
     #[rstest]

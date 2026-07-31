@@ -20,6 +20,7 @@ from nautilus_trader.core.nautilus_pyo3 import OKXContractType
 from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
 from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
 from nautilus_trader.core.nautilus_pyo3 import OKXMarginMode
+from nautilus_trader.core.nautilus_pyo3 import OKXRegion
 from nautilus_trader.core.nautilus_pyo3 import OKXVipLevel
 
 
@@ -59,8 +60,14 @@ class OKXDataClientConfig(LiveDataClientConfig, frozen=True):
     environment : OKXEnvironment, optional
         The OKX environment for the client (LIVE or DEMO).
         If ``None`` then defaults to LIVE.
+    region : OKXRegion, optional
+        The OKX API region (GLOBAL, EEA, or US) used to select the regional endpoints.
+        EEA accounts are registered on my.okx.com, US/AU accounts on app.okx.com.
+        If ``None`` then defaults to GLOBAL. Ignored when `base_url_http`/`base_url_ws` are set.
     update_instruments_interval_mins: PositiveInt or None, default 60
         The interval (minutes) between reloading instruments from the venue.
+    load_spreads : bool, default False
+        If True, load OKX Nitro spread instruments from the spread endpoint.
     vip_level : OKXVipLevel, optional
         The account VIP level to determine book subscriptions.
         - Only VIP4 and above in trading fee tier are allowed to subscribe to "books50-l2-tbt" 50 depth channels (10 ms updates).
@@ -75,6 +82,7 @@ class OKXDataClientConfig(LiveDataClientConfig, frozen=True):
     instrument_families: tuple[str, ...] | None = None
     contract_types: tuple[OKXContractType, ...] | None = None
     environment: OKXEnvironment | None = None
+    region: OKXRegion | None = None
     base_url_http: str | None = None
     base_url_ws: str | None = None
     proxy_url: str | None = None
@@ -83,6 +91,7 @@ class OKXDataClientConfig(LiveDataClientConfig, frozen=True):
     retry_delay_initial_ms: PositiveInt | None = 1_000
     retry_delay_max_ms: PositiveInt | None = 10_000
     update_instruments_interval_mins: PositiveInt | None = 60
+    load_spreads: bool = False
     vip_level: OKXVipLevel | None = None
 
 
@@ -122,6 +131,10 @@ class OKXExecClientConfig(LiveExecClientConfig, frozen=True):
     environment : OKXEnvironment, optional
         The OKX environment for the client (LIVE or DEMO).
         If ``None`` then defaults to LIVE.
+    region : OKXRegion, optional
+        The OKX API region (GLOBAL, EEA, or US) used to select the regional endpoints.
+        EEA accounts are registered on my.okx.com, US/AU accounts on app.okx.com.
+        If ``None`` then defaults to GLOBAL. Ignored when `base_url_http`/`base_url_ws` are set.
     margin_mode : OKXMarginMode, optional
         The intended OKX account margin mode.
         - `ISOLATED`: Margin isolated to specific positions (default)
@@ -153,6 +166,8 @@ class OKXExecClientConfig(LiveExecClientConfig, frozen=True):
         If False, SPOT instruments return FLAT position reports (default behavior).
     ws_auth_timeout_secs : PositiveInt, default 30
         The timeout (seconds) for WebSocket authentication.
+    load_spreads : bool, default False
+        If True, load OKX Nitro spread instruments and subscribe to spread order updates.
 
     """
 
@@ -163,6 +178,7 @@ class OKXExecClientConfig(LiveExecClientConfig, frozen=True):
     contract_types: tuple[OKXContractType, ...] | None = None
     instrument_families: tuple[str, ...] | None = None
     environment: OKXEnvironment | None = None
+    region: OKXRegion | None = None
     base_url_http: str | None = None
     base_url_ws: str | None = None
     proxy_url: str | None = None
@@ -176,3 +192,4 @@ class OKXExecClientConfig(LiveExecClientConfig, frozen=True):
     use_mm_mass_cancel: bool = False
     use_spot_cash_position_reports: bool = False
     ws_auth_timeout_secs: PositiveInt | None = 30
+    load_spreads: bool = False

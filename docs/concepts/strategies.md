@@ -43,6 +43,16 @@ The main capabilities of a strategy include:
 - Portfolio access.
 - Creating and managing orders and positions.
 
+:::info Rust implementation
+Rust strategy authors implement the `DataActor` callbacks they need and use
+`nautilus_strategy!` to generate the `Strategy` implementation, then call facade
+methods such as `clock()`, `cache()`, `order()`, and `portfolio()` on `self`.
+`DataActorNative` is native-only access to runtime wiring and actor-core state;
+`StrategyNative` exposes borrowed strategy state such as order factory, order
+manager, and portfolio access. Import them only for same-binary performance
+paths or internal runtime wiring.
+:::
+
 ## Strategy implementation
 
 A trading strategy inherits from `Strategy`, so you must define a constructor.
@@ -213,6 +223,9 @@ Here we can see the following:
 - Historical data being requested (to hydrate the indicators).
 - Live data being subscribed to.
 
+The cache check matters in live trading. Direct subscriptions assume the instrument was
+loaded by the instrument provider config or by an earlier instrument request.
+
 ```python
 def on_start(self) -> None:
     """
@@ -228,13 +241,17 @@ def on_start(self) -> None:
     self.register_indicator_for_bars(self.bar_type, self.fast_ema)
     self.register_indicator_for_bars(self.bar_type, self.slow_ema)
 
-    # Get historical data
-    self.request_bars(self.bar_type)
-
-    # Subscribe to live data
-    self.subscribe_bars(self.bar_type)
+    # Get historical data and subscribe to live data
+    self.request_bars(
+        self.bar_type,
+        callback=lambda _: self.subscribe_bars(self.bar_type),
+    )
     self.subscribe_quote_ticks(self.instrument_id)
 ```
+
+Live bars are subscribed via the `request_bars()` `callback` so the stream starts only
+once history has loaded; see [Working with bars: request vs. subscribe](data.md#working-with-bars-request-vs-subscribe)
+for why this matters under `validate_data_sequence=True`.
 
 ### Clock and timers
 
@@ -386,7 +403,7 @@ The component a `SubmitOrder` or `SubmitOrderList` command will flow to for exec
 - If an `exec_algorithm_id` is specified (with no `emulation_trigger`), the command will *firstly* be sent to the relevant `ExecAlgorithm`.
 - Otherwise, the command will *firstly* be sent to the `RiskEngine`.
 
-This example submits a `LIMIT` BUY order for emulation (see [Emulated Orders](orders.md#emulated-orders)):
+This example submits a `LIMIT` BUY order for emulation (see [Emulated Orders](orders/emulated.md)):
 
 ```python
 from nautilus_trader.model.enums import OrderSide
@@ -710,5 +727,5 @@ See the [`StrategyId` API Reference](/docs/python-api-latest/model/identifiers.h
 
 - [Actors](actors.md) - Base class that strategies extend.
 - [Events](events.md) - Event types and handler dispatch.
-- [Orders](orders.md) - Order types and management from strategies.
+- [Orders](orders/) - Order types and management from strategies.
 - [Backtesting](backtesting.md) - Test strategies with historical data.

@@ -76,6 +76,7 @@ where
 fn ws_data_to_pyobject(py: Python<'_>, data: Data) -> PyResult<Py<PyAny>> {
     match data {
         Data::Custom(custom) => Py::new(py, custom).map(|obj| obj.into_any()),
+        Data::OptionGreeks(greeks) => Py::new(py, greeks).map(|obj| obj.into_any()),
         other => Ok(data_to_pycapsule(py, other)),
     }
 }
@@ -128,17 +129,21 @@ impl DeribitWebSocketClient {
 
     /// Creates an authenticated client with credentials.
     ///
-    /// Uses environment variables to load credentials:
+    /// Resolves each credential from the provided argument first, falling back
+    /// to the environment variable for the given `environment`:
     /// - Testnet: `DERIBIT_TESTNET_API_KEY` and `DERIBIT_TESTNET_API_SECRET`
     /// - Mainnet: `DERIBIT_API_KEY` and `DERIBIT_API_SECRET`
     #[staticmethod]
-    #[pyo3(name = "with_credentials", signature = (environment, account_id = None, proxy_url = None))]
+    #[pyo3(name = "with_credentials", signature = (environment, api_key = None, api_secret = None, account_id = None, proxy_url = None))]
     fn py_with_credentials(
         environment: DeribitEnvironment,
+        api_key: Option<String>,
+        api_secret: Option<String>,
         account_id: Option<AccountId>,
         proxy_url: Option<String>,
     ) -> PyResult<Self> {
-        let mut client = Self::with_credentials(environment, proxy_url).map_err(to_pyvalue_err)?;
+        let mut client = Self::with_credentials(environment, api_key, api_secret, proxy_url)
+            .map_err(to_pyvalue_err)?;
 
         if let Some(id) = account_id {
             client.set_account_id(id);
@@ -292,13 +297,13 @@ impl DeribitWebSocketClient {
                             call_python_threadsafe(py, &call_soon, &callback, py_obj);
                         }),
                         NautilusWsMessage::Error(err) => {
-                            log::error!("WebSocket error: {err}");
+                            log::warn!("WebSocket error: {err}");
                         }
                         NautilusWsMessage::Reconnected => {
                             log::info!("WebSocket reconnected");
                         }
                         NautilusWsMessage::Authenticated(auth_result) => {
-                            log::info!("WebSocket authenticated (scope: {})", auth_result.scope);
+                            log::debug!("WebSocket authenticated (scope: {})", auth_result.scope);
                         }
                         NautilusWsMessage::InstrumentStatus(status) => {
                             call_python_with_data(&call_soon, &callback, |py| {
@@ -421,7 +426,7 @@ impl DeribitWebSocketClient {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if let Err(e) = client.close().await {
-                log::error!("Error on close: {e}");
+                log::warn!("Error on close: {e}");
             }
             Ok(())
         })

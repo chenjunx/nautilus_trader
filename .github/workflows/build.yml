@@ -30,7 +30,7 @@ jobs:
       run-rust-tests: ${{ steps.plan.outputs.run_rust_tests }}
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -38,7 +38,7 @@ jobs:
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -71,7 +71,7 @@ jobs:
         ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -80,7 +80,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           # Full history so changed-file scripts can resolve CHANGED_BASE_SHA.
@@ -118,7 +118,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -127,7 +127,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -137,7 +137,14 @@ jobs:
           tool-name: cargo-deny
 
       - name: Run cargo-deny (advisories, licenses, sources, bans)
-        run: cargo deny --all-features check advisories licenses sources bans
+        run: |
+          cargo deny --all-features check advisories licenses sources bans
+          cargo deny --manifest-path crates/adapters/lighter/fuzz/Cargo.toml \
+            --locked --all-features check --config .cargo/deny-fuzz.toml \
+            advisories licenses sources bans
+          cargo deny --manifest-path crates/adapters/derive/fuzz/Cargo.toml \
+            --locked --all-features check --config .cargo/deny-fuzz.toml \
+            advisories licenses sources bans
 
   # Supply chain security auditing (master only - gates releases)
   # https://mozilla.github.io/cargo-vet/configuring-ci.html
@@ -146,7 +153,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -155,7 +162,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -165,7 +172,12 @@ jobs:
           tool-name: cargo-vet
 
       - name: Run cargo-vet
-        run: cargo vet --locked
+        run: |
+          cargo vet --locked
+          cargo vet --locked --manifest-path crates/adapters/lighter/fuzz/Cargo.toml \
+            --store-path .supply-chain
+          cargo vet --locked --manifest-path crates/adapters/derive/fuzz/Cargo.toml \
+            --store-path .supply-chain
 
   build-linux-x86:
     if: github.ref != 'refs/heads/test-pre-commit' && needs.plan.outputs.run-tests == 'true'
@@ -234,7 +246,7 @@ jobs:
     # yamllint enable rule:line-length
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -243,7 +255,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -284,6 +296,26 @@ jobs:
       - name: Cached test data
         uses: ./.github/actions/common-test-data
 
+      # Fork-PR runners vary in disk size; fail early with a clear message
+      # rather than a cryptic linker Bus error when a small VM runs out.
+      - name: Check available disk space
+        if: >-
+          needs.plan.outputs.run-rust-tests == 'true'
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.fork
+        run: |
+          echo "::group::Disk space before Rust tests"
+          df -h /
+          echo "::endgroup::"
+          avail_gb=$(($(df -Pk / | awk 'NR==2 {print $4}') / 1024 / 1024))
+          echo "Available on / : ${avail_gb}G"
+          if [ "${avail_gb}" -lt 25 ]; then
+            echo "::error::Only ${avail_gb}G free, runner too small for the Rust build. Re-run for a larger VM."
+            exit 1
+          elif [ "${avail_gb}" -lt 40 ]; then
+            echo "::warning::Only ${avail_gb}G free, the Rust build may run out of space, re-run if it fails."
+          fi
+
       - name: Run Rust tests (core)
         if: needs.plan.outputs.run-rust-tests == 'true'
         run: make cargo-test-core EXTRA_FEATURES="capnp,hypersync" NEXTEST_PROFILE=ci
@@ -297,7 +329,7 @@ jobs:
         run: |
           rm -rf "${CARGO_TARGET_DIR}/nextest"
           rm -rf "${CARGO_TARGET_DIR}/${CARGO_CI_PROFILE:-nextest}"
-          df -h .
+          df -h . "${CARGO_TARGET_DIR}"
 
       # Temporary: fail fast on rare runner worktree corruption while we isolate the root cause
       - name: Verify immutable CI inputs (pre-wheel build)
@@ -316,6 +348,8 @@ jobs:
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
+        with:
+          retention-days: ${{ github.ref_name == 'master' && '7' || '1' }}
 
   build-linux-arm:
     strategy:
@@ -371,7 +405,7 @@ jobs:
     # yamllint enable rule:line-length
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -380,7 +414,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -444,6 +478,8 @@ jobs:
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
+        with:
+          retention-days: ${{ github.ref_name == 'master' && '7' || '1' }}
 
   build-macos:
     # macOS stays off develop pushes and pre-commit-only test runs.
@@ -473,7 +509,7 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -482,7 +518,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -601,6 +637,8 @@ jobs:
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
+        with:
+          retention-days: ${{ github.ref_name == 'master' && '7' || '1' }}
 
   build-windows:
     # Windows stays off PRs, develop pushes, and pre-commit-only test runs.
@@ -635,17 +673,12 @@ jobs:
       PARALLEL_BUILD: false
       RUST_BACKTRACE: 1
     steps:
-      # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
-        with:
-          egress-policy: ${{ env.EGRESS_POLICY }}
-          allowed-endpoints: >-
-            ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
-            ${{ vars.CI_ALLOWED_ENDPOINTS }}
+      # Harden-Runner skips its agent on Depot Windows,
+      # and its post step assumes C:\agent exists. Keep this job out until upstream fixes cleanup.
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -681,6 +714,8 @@ jobs:
 
       - name: Upload wheel artifact
         uses: ./.github/actions/upload-artifact-wheel
+        with:
+          retention-days: ${{ github.ref_name == 'master' && '7' || '1' }}
 
   publish-wheels-develop:
     name: publish-wheels-develop
@@ -706,19 +741,18 @@ jobs:
       CLOUDFLARE_R2_BUCKET_NAME: "packages"
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
-            # Sigstore TUF trust root (for gh attestation verify)
             tuf-repo-cdn.sigstore.dev:443
             ${{ secrets.CLOUDFLARE_R2_ALLOWED_HOST }}:443
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -737,23 +771,16 @@ jobs:
 
       # https://github.com/actions/attest-build-provenance
       - name: Attest wheel provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: ./.github/actions/attest-build-provenance-retry
         with:
           subject-path: "dist/nautilus_trader-*.whl"
 
       - name: Verify wheel attestations
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
-          ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          set -e
-          for whl in dist/nautilus_trader-*.whl; do
-            gh attestation verify "$whl" \
-              --repo "$GITHUB_REPOSITORY" \
-              --cert-identity "$IDENTITY" \
-              --cert-oidc-issuer "$ISSUER"
-          done
+          ATTESTATION_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          ATTESTATION_ISSUER: https://token.actions.githubusercontent.com
+        run: bash ./scripts/ci/verify-gh-attestations.bash dist/nautilus_trader-*.whl
 
       - name: Publish wheels to Cloudflare R2
         uses: ./.github/actions/publish-wheels
@@ -776,7 +803,7 @@ jobs:
     if: >
       github.event_name == 'push' && github.ref == 'refs/heads/nightly'
     steps:
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -784,7 +811,7 @@ jobs:
             ${{ vars.SECURITY_AUDIT_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -809,19 +836,24 @@ jobs:
 
       - name: Run cargo-audit (fail on vulnerabilities)
         if: steps.gate.outputs.override_active != 'true'
-        run: cargo audit --deny unsound
+        run: |
+          cargo audit --deny unsound
+          cargo audit --deny unsound --file crates/adapters/lighter/fuzz/Cargo.lock
+          cargo audit --deny unsound --file crates/adapters/derive/fuzz/Cargo.lock
 
       - name: Run osv-scanner
         id: osv-scan
         if: steps.gate.outputs.override_active != 'true'
         continue-on-error: true
-        uses: google/osv-scanner-action/osv-scanner-action@c51854704019a247608d928f370c98740469d4b5 # v2.3.5
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |
             --config=osv-scanner.toml
             --format json
             --output=/github/workspace/osv-results.json
             --lockfile=Cargo.lock
+            --lockfile=crates/adapters/lighter/fuzz/Cargo.lock
+            --lockfile=crates/adapters/derive/fuzz/Cargo.lock
             --lockfile=uv.lock
             --lockfile=python/uv.lock
 
@@ -850,19 +882,18 @@ jobs:
       CLOUDFLARE_R2_BUCKET_NAME: "packages"
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
-            # Sigstore TUF trust root (for gh attestation verify)
             tuf-repo-cdn.sigstore.dev:443
             ${{ secrets.CLOUDFLARE_R2_ALLOWED_HOST }}:443
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -875,23 +906,16 @@ jobs:
 
       # https://github.com/actions/attest-build-provenance
       - name: Attest wheel provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: ./.github/actions/attest-build-provenance-retry
         with:
           subject-path: "dist/nautilus_trader-*.whl"
 
       - name: Verify wheel attestations
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
-          ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          set -e
-          for whl in dist/nautilus_trader-*.whl; do
-            gh attestation verify "$whl" \
-              --repo "$GITHUB_REPOSITORY" \
-              --cert-identity "$IDENTITY" \
-              --cert-oidc-issuer "$ISSUER"
-          done
+          ATTESTATION_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          ATTESTATION_ISSUER: https://token.actions.githubusercontent.com
+        run: bash ./scripts/ci/verify-gh-attestations.bash dist/nautilus_trader-*.whl
 
       - name: Publish wheels to Cloudflare R2
         uses: ./.github/actions/publish-wheels
@@ -916,7 +940,7 @@ jobs:
       github.event_name == 'push' && github.ref == 'refs/heads/master'
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -928,7 +952,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -987,7 +1011,7 @@ jobs:
       CLOUDFLARE_R2_BUCKET_NAME: "packages"
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -997,7 +1021,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -1033,21 +1057,21 @@ jobs:
       github.event_name == 'push' && github.ref == 'refs/heads/master'
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
-            # Sigstore TUF trust root (for gh attestation verify)
             tuf-repo-cdn.sigstore.dev:443
+            rekor.sigstore.dev:443
             pypi.org:443
             files.pythonhosted.org:443
             upload.pypi.org:443
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -1058,10 +1082,13 @@ jobs:
           echo "PYPI_ATTESTATIONS_VERSION=$(bash scripts/tool-version.sh pypi-attestations)" >> "$GITHUB_ENV"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
+
+      - name: Check Rekor readiness
+        run: bash ./scripts/ci/check-rekor-ready.bash
 
       - name: Download built wheel artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1071,30 +1098,21 @@ jobs:
           merge-multiple: true
 
       - name: Generate PyPI publish attestations
-        run: |
-          uv run --no-project --no-build --with "pypi-attestations==${PYPI_ATTESTATIONS_VERSION}" -- \
-            python -m pypi_attestations sign dist/nautilus_trader-*.whl
+        run: bash ./scripts/ci/sign-pypi-attestations.bash dist/nautilus_trader-*.whl
 
       # https://github.com/actions/attest-build-provenance
       - name: Attest wheel provenance
         id: attest-wheels
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: ./.github/actions/attest-build-provenance-retry
         with:
           subject-path: "dist/nautilus_trader-*.whl"
 
       - name: Verify wheel attestations
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
-          ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          set -e
-          for whl in dist/nautilus_trader-*.whl; do
-            gh attestation verify "$whl" \
-              --repo "$GITHUB_REPOSITORY" \
-              --cert-identity "$IDENTITY" \
-              --cert-oidc-issuer "$ISSUER"
-          done
+          ATTESTATION_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          ATTESTATION_ISSUER: https://token.actions.githubusercontent.com
+        run: bash ./scripts/ci/verify-gh-attestations.bash dist/nautilus_trader-*.whl
 
       - name: Publish wheels to PyPI
         if: success()
@@ -1114,7 +1132,97 @@ jobs:
             dist/nautilus_trader-*.whl.sigstore
             dist/nautilus_trader-*.whl.intoto.jsonl
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+
+  release-cargo-publish-preflight:
+    name: release cargo publish preflight
+    runs-on: ubuntu-latest
+    needs:
+      - cargo-deny
+      - cargo-vet
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+    steps:
+      # https://github.com/step-security/harden-runner
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: ${{ env.EGRESS_POLICY }}
+          allowed-endpoints: >-
+            ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
+            ${{ vars.CI_ALLOWED_ENDPOINTS }}
+            crates.io:443
+            index.crates.io:443
+            static.crates.io:443
+
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Common setup
+        uses: ./.github/actions/common-setup
+        with:
+          python-version: "3.13"
+          build-type: "test"
+          free-disk-space: "true"
+          uv-cache-enabled: "false"
+          prek-cache-enabled: "false"
+          capnp-cache-enabled: "false"
+          rust-cache-enabled: "false"
+          rust-cache-save-if: "false"
+
+      - name: Check Cargo crate publish plan
+        run: bash scripts/ci/publish-cargo-crates.sh --check
+
+      - name: Dry-run Cargo crate publishing
+        run: bash scripts/ci/publish-cargo-crates.sh --dry-run
+
+  release-docs-features-preflight:
+    name: release docs/features preflight
+    runs-on: [self-hosted, Linux, X64, self-hosted-linux-x86]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: /home/runner/.cache/cargo-target/release-docs-features-preflight
+    steps:
+      # https://github.com/step-security/harden-runner
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: ${{ env.EGRESS_POLICY }}
+          allowed-endpoints: >-
+            ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
+            ${{ vars.CI_ALLOWED_ENDPOINTS }}
+
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Common setup
+        uses: ./.github/actions/common-setup
+        with:
+          python-version: "3.13"
+          free-disk-space: "true"
+          rust-cache-enabled: "false"
+
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly
+
+      # https://github.com/taiki-e/install-action
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-hack
+
+      - name: Run docsrs-check
+        run: make docsrs-check
+
+      - name: Run check-features
+        run: make check-features
 
   tag-release:
     needs:
@@ -1124,6 +1232,8 @@ jobs:
       - build-windows
       - cargo-deny
       - cargo-vet
+      - release-cargo-publish-preflight
+      - release-docs-features-preflight
     permissions:
       contents: write # Required for pushing tags and upload release assets
       actions: write # Required for creating releases
@@ -1134,7 +1244,7 @@ jobs:
       tag_name: ${{ env.TAG_NAME }}
     steps:
       # Security hardening
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -1143,7 +1253,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: true # Required for salsify action to push git tags
           fetch-depth: 2
@@ -1192,7 +1302,7 @@ jobs:
       COPY_TO_SOURCE: false # Do not copy built *.so files back into source tree
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -1203,7 +1313,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -1226,7 +1336,7 @@ jobs:
           name: release-sdist
           path: dist/nautilus_trader-*.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   upload-sdist-release:
     needs:
@@ -1239,7 +1349,7 @@ jobs:
       contents: write # Required for uploading release assets
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
@@ -1248,7 +1358,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -1279,21 +1389,21 @@ jobs:
       attestations: write # Required for GitHub artifact attestations
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
-            # Sigstore TUF trust root (for gh attestation verify)
             tuf-repo-cdn.sigstore.dev:443
+            rekor.sigstore.dev:443
             pypi.org:443
             files.pythonhosted.org:443
             upload.pypi.org:443
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -1304,10 +1414,13 @@ jobs:
           echo "PYPI_ATTESTATIONS_VERSION=$(bash scripts/tool-version.sh pypi-attestations)" >> "$GITHUB_ENV"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
+
+      - name: Check Rekor readiness
+        run: bash ./scripts/ci/check-rekor-ready.bash
 
       - name: Download sdist artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1316,27 +1429,21 @@ jobs:
           path: dist
 
       - name: Generate PyPI publish attestation
-        run: |
-          uv run --no-project --no-build --with "pypi-attestations==${PYPI_ATTESTATIONS_VERSION}" -- \
-            python -m pypi_attestations sign dist/nautilus_trader-*.tar.gz
+        run: bash ./scripts/ci/sign-pypi-attestations.bash dist/nautilus_trader-*.tar.gz
 
       # https://github.com/actions/attest-build-provenance
       - name: Attest sdist provenance
         id: attest-sdist
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: ./.github/actions/attest-build-provenance-retry
         with:
           subject-path: "dist/nautilus_trader-*.tar.gz"
 
       - name: Verify sdist attestation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
-          ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          gh attestation verify dist/nautilus_trader-*.tar.gz \
-            --repo "$GITHUB_REPOSITORY" \
-            --cert-identity "$IDENTITY" \
-            --cert-oidc-issuer "$ISSUER"
+          ATTESTATION_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          ATTESTATION_ISSUER: https://token.actions.githubusercontent.com
+        run: bash ./scripts/ci/verify-gh-attestations.bash dist/nautilus_trader-*.tar.gz
 
       - name: Publish sdist to PyPI
         if: success()
@@ -1356,7 +1463,7 @@ jobs:
             dist/nautilus_trader-*.tar.gz.sigstore
             dist/nautilus_trader-*.tar.gz.intoto.jsonl
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish-release-integrity:
     needs:
@@ -1371,14 +1478,14 @@ jobs:
       contents: write # Required for uploading release integrity assets
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
-            # Sigstore TUF trust root (for pypi-attestations verify)
             tuf-repo-cdn.sigstore.dev:443
+            rekor.sigstore.dev:443
             pypi.org:443
             files.pythonhosted.org:443
             crates.io:443
@@ -1387,7 +1494,7 @@ jobs:
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -1397,19 +1504,22 @@ jobs:
           echo "UV_VERSION=$(bash scripts/uv-version.sh)" >> "$GITHUB_ENV"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
 
-      - name: Publish release checksums
+      - name: Check Rekor readiness
+        run: bash ./scripts/ci/check-rekor-ready.bash
+
+      - name: Generate release checksums
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.tag-release.outputs.tag_name }}
           ATTESTATION_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
           ATTESTATION_ISSUER: https://token.actions.githubusercontent.com
-        run: bash ./scripts/ci/publish-release-checksums.sh
+        run: bash ./scripts/ci/publish-release-checksums.sh --generate-only release-assets
 
       - name: Verify published registries
         shell: bash
@@ -1418,10 +1528,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYPI_PUBLISHER_WORKFLOW: build.yml
           PYPI_PUBLISHER_ENVIRONMENT: release
+          CRATES_IO_MANUAL_PUBLISH_EXCEPTIONS: ${{ vars.CRATES_IO_MANUAL_PUBLISH_EXCEPTIONS }}
           CARGO_PUBLISH_USER_AGENT: >-
             nautilus-trader-release-verifier
             (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
         run: bash ./scripts/ci/verify-published-registries.bash release-assets
+
+      - name: Publish release checksums
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.tag-release.outputs.tag_name }}
+          ATTESTATION_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          ATTESTATION_ISSUER: https://token.actions.githubusercontent.com
+        run: bash ./scripts/ci/publish-release-checksums.sh --publish-existing release-assets
 
       - name: Upload crates manifest
         env:
@@ -1446,8 +1566,10 @@ jobs:
           TAG_NAME: ${{ needs.tag-release.outputs.tag_name }}
         run: bash ./scripts/ci/upload-release-attestation-siblings.bash release-attestations
 
+      # success() so a failed publish-release-integrity leaves attestation
+      # workflow artifacts in place for re-runs.
       - name: Delete artifacts for current run
-        if: always()
+        if: success()
         continue-on-error: true
         shell: bash
         env:
@@ -1465,18 +1587,29 @@ jobs:
       contents: write # Required for publishing the draft release
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: ${{ env.EGRESS_POLICY }}
           allowed-endpoints: >-
             ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
             ${{ vars.CI_ALLOWED_ENDPOINTS }}
+            rekor.sigstore.dev:443
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+
+      - name: Verify final release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.tag-release.outputs.tag_name }}
+          GH_RELEASE_EXPECT_DRAFT: "true"
+        run: bash ./scripts/ci/verify-github-release-assets.bash
+
+      - name: Check Rekor readiness
+        run: bash ./scripts/ci/check-rekor-ready.bash
 
       - name: Publish GitHub release
         env:

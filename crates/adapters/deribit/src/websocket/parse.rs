@@ -48,7 +48,7 @@ use super::{
         DeribitTickerMsg, DeribitTradeMsg, DeribitUserTradeMsg,
     },
 };
-use crate::http::models::DeribitPosition;
+use crate::{common::parse::build_public_trade_id, http::models::DeribitPosition};
 
 fn next_8_utc(from_ns: UnixNanos) -> anyhow::Result<UnixNanos> {
     let from_secs = from_ns.as_u64() / 1_000_000_000;
@@ -96,7 +96,12 @@ pub fn parse_trade_msg(
         _ => AggressorSide::NoAggressor,
     };
 
-    let trade_id = TradeId::new(&msg.trade_id);
+    let trade_id = build_public_trade_id(
+        &msg.trade_id,
+        msg.block_rfq_id,
+        msg.block_trade_id.as_deref(),
+        msg.combo_id.as_deref(),
+    );
     let ts_event = UnixNanos::new(msg.timestamp * NANOSECONDS_IN_MILLISECOND);
 
     TradeTick::new_checked(
@@ -654,6 +659,11 @@ pub fn resolution_to_bar_type(
 /// Converts a single OHLCV data point from the `chart.trades.{instrument}.{resolution}` channel
 /// into a Nautilus Bar object.
 ///
+/// When `use_cost_for_volume` is true, `Bar.volume` is populated from `chart_msg.cost` (USD) to
+/// match instruments whose trade `amount` is in USD (inverse perpetuals / inverse futures).
+/// Otherwise `chart_msg.volume` (base currency) is used. Callers derive this from the instrument
+/// via [`crate::common::parse::use_cost_for_bar_volume`].
+///
 /// # Errors
 ///
 /// Returns an error if:
@@ -664,6 +674,7 @@ pub fn parse_chart_msg(
     bar_type: BarType,
     price_precision: u8,
     size_precision: u8,
+    use_cost_for_volume: bool,
     timestamp_on_close: bool,
     ts_init: UnixNanos,
 ) -> anyhow::Result<Bar> {
@@ -672,8 +683,12 @@ pub fn parse_chart_msg(
     let low = Price::new_checked(chart_msg.low, price_precision).context("Invalid low price")?;
     let close =
         Price::new_checked(chart_msg.close, price_precision).context("Invalid close price")?;
-    let volume =
-        Quantity::new_checked(chart_msg.volume, size_precision).context("Invalid volume")?;
+    let raw_volume = if use_cost_for_volume {
+        chart_msg.cost
+    } else {
+        chart_msg.volume
+    };
+    let volume = Quantity::new_checked(raw_volume, size_precision).context("Invalid volume")?;
 
     // Convert timestamp from milliseconds to nanoseconds
     let mut ts_event = UnixNanos::from(chart_msg.tick * NANOSECONDS_IN_MILLISECOND);
@@ -929,10 +944,10 @@ pub fn parse_user_trade_msg(
 /// Parses a Deribit position into a Nautilus `PositionStatusReport`.
 ///
 /// # Arguments
-/// * `position` - The Deribit position data from `/private/get_positions`
-/// * `instrument` - The corresponding Nautilus instrument
-/// * `account_id` - The account ID for the report
-/// * `ts_init` - Initialization timestamp
+/// - `position` - The Deribit position data from `/private/get_positions`
+/// - `instrument` - The corresponding Nautilus instrument
+/// - `account_id` - The account ID for the report
+/// - `ts_init` - Initialization timestamp
 ///
 /// # Returns
 /// A `PositionStatusReport` representing the current position state.
@@ -947,7 +962,7 @@ pub fn parse_position_status_report(
     let size_precision = instrument.size_precision();
 
     let signed_qty = Quantity::from_decimal_dp(position.size.abs(), size_precision)
-        .unwrap_or_else(|_| Quantity::new(0.0, size_precision));
+        .unwrap_or_else(|_| Quantity::zero(size_precision));
 
     let position_side = match position.direction.as_str() {
         "buy" => PositionSideSpecified::Long,
@@ -1117,7 +1132,7 @@ pub fn parse_order_updated(
     let client_order_id =
         extract_client_order_id(msg).unwrap_or_else(|| ClientOrderId::new(&msg.order_id));
     let quantity = Quantity::from_decimal_dp(msg.amount, size_precision)
-        .unwrap_or_else(|_| Quantity::new(0.0, size_precision));
+        .unwrap_or_else(|_| Quantity::zero(size_precision));
     let price = msg
         .price
         .and_then(|p| Price::from_decimal_dp(p, price_precision).ok());
@@ -1151,9 +1166,9 @@ pub fn parse_order_updated(
 /// It's used by the handler to determine which event to emit for a given order update.
 ///
 /// # Arguments
-/// * `order_state` - The Deribit order state string ("open", "filled", "cancelled", etc.)
-/// * `is_new_order` - Whether this is the first time we're seeing this order
-/// * `was_amended` - Whether this update is due to an amendment (edit) operation
+/// - `order_state` - The Deribit order state string ("open", "filled", "cancelled", etc.)
+/// - `is_new_order` - Whether this is the first time we're seeing this order
+/// - `was_amended` - Whether this update is due to an amendment (edit) operation
 ///
 /// # Returns
 /// The type of event that should be emitted, or `None` if no event should be emitted.
@@ -1263,6 +1278,169 @@ mod tests {
         assert_eq!(tick.size, instrument.make_qty(750.0, None));
         assert_eq!(tick.aggressor_side, AggressorSide::Seller);
         assert_eq!(tick.trade_id.to_string(), "403691825");
+    }
+
+    fn make_trade_msg(
+        instrument_name: &str,
+        trade_id: &str,
+        block_trade_id: Option<&str>,
+        block_rfq_id: Option<i64>,
+        combo_id: Option<&str>,
+    ) -> DeribitTradeMsg {
+        let raw = serde_json::json!({
+            "trade_id": trade_id,
+            "instrument_name": instrument_name,
+            "price": 92294.5,
+            "amount": 10.0,
+            "direction": "buy",
+            "timestamp": 1_765_531_356_452_u64,
+            "trade_seq": 1,
+            "tick_direction": 0,
+            "index_price": 92276.75,
+            "mark_price": 92287.11,
+            "block_trade_id": block_trade_id,
+            "block_rfq_id": block_rfq_id,
+            "combo_id": combo_id,
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
+    #[rstest]
+    fn test_parse_trade_msg_tags_block_trade() {
+        let instrument = test_perpetual_instrument();
+        let msg = make_trade_msg("BTC-PERPETUAL", "244343055", Some("12345"), None, None);
+        let tick = parse_trade_msg(&msg, &instrument, UnixNanos::default()).unwrap();
+        assert_eq!(tick.trade_id.to_string(), "BLK-244343055");
+    }
+
+    #[rstest]
+    fn test_parse_trade_msg_tags_block_rfq() {
+        let instrument = test_perpetual_instrument();
+        let msg = make_trade_msg("BTC-PERPETUAL", "244343055", None, Some(99), None);
+        let tick = parse_trade_msg(&msg, &instrument, UnixNanos::default()).unwrap();
+        assert_eq!(tick.trade_id.to_string(), "RFQ-244343055");
+    }
+
+    #[rstest]
+    fn test_parse_trade_msg_tags_combo_leg() {
+        // Per-leg trade originating from a combo: combo_id is set by Deribit
+        // even though the instrument is a plain perp / option, so downstream
+        // sees `COMBO-` and can detect combo-origin fills.
+        let instrument = test_perpetual_instrument();
+        let msg = make_trade_msg(
+            "BTC-PERPETUAL",
+            "244343055",
+            None,
+            None,
+            Some("BTC-FS-25DEC26_PERP"),
+        );
+        let tick = parse_trade_msg(&msg, &instrument, UnixNanos::default()).unwrap();
+        assert_eq!(tick.trade_id.to_string(), "COMBO-244343055");
+    }
+
+    fn load_combo_option_instrument() -> InstrumentAny {
+        let combo_json = load_test_json("http_get_instruments_option_combo.json");
+        let combo_response: DeribitJsonRpcResponse<Vec<DeribitInstrument>> =
+            serde_json::from_str(&combo_json).unwrap();
+        let combo_raw = combo_response
+            .result
+            .unwrap()
+            .into_iter()
+            .find(|i| i.instrument_name.as_str() == "BTC-CS-19MAY26-70000_75000")
+            .expect("fixture must contain BTC-CS-19MAY26-70000_75000");
+        parse_deribit_instrument_any(&combo_raw, UnixNanos::default(), UnixNanos::default())
+            .unwrap()
+            .unwrap()
+    }
+
+    fn load_combo_trade_msgs() -> Vec<DeribitTradeMsg> {
+        let json = load_test_json("ws_trades_option_combo.json");
+        let response: serde_json::Value = serde_json::from_str(&json).unwrap();
+        serde_json::from_value(response["params"]["data"].clone()).unwrap()
+    }
+
+    #[rstest]
+    fn test_parse_trades_data_combo_emits_single_tick() {
+        // Step 1 finding: combo legs already publish on their own per-leg
+        // streams. Parsing a combo trade message should produce exactly one
+        // TradeTick (for the combo), not N+1.
+        let combo_inst = load_combo_option_instrument();
+        let mut cache: AHashMap<Ustr, InstrumentAny> = AHashMap::new();
+        cache.insert(Ustr::from("BTC-CS-19MAY26-70000_75000"), combo_inst.clone());
+
+        let trades = load_combo_trade_msgs();
+        // Sanity: the combo message itself carries the legs array.
+        let legs = trades[0].legs.as_ref().expect("combo trade must have legs");
+        assert_eq!(legs.len(), 2);
+
+        let data = parse_trades_data(&trades, &cache, UnixNanos::default());
+        assert_eq!(data.len(), 1, "should emit one tick for the combo only");
+
+        let Data::Trade(tick) = &data[0] else {
+            panic!("expected Data::Trade");
+        };
+        assert_eq!(tick.instrument_id, combo_inst.id());
+        // Exact values from fixture; independent of the instrument under test
+        // so a regression in price/size precision is caught here too.
+        assert_eq!(tick.price, Price::from("0.0639"));
+        assert_eq!(tick.size, Quantity::from("0.1"));
+        assert_eq!(tick.aggressor_side, AggressorSide::Seller);
+        assert_eq!(tick.trade_id.to_string(), "244365193");
+    }
+
+    #[rstest]
+    fn test_parse_trades_data_combo_not_cached_emits_no_tick() {
+        // When the combo InstrumentAny is not in the WS handler cache,
+        // parse_trades_data must drop the message rather than panic or
+        // synthesise a tick against an unknown instrument.
+        let cache: AHashMap<Ustr, InstrumentAny> = AHashMap::new();
+        let trades = load_combo_trade_msgs();
+        let data = parse_trades_data(&trades, &cache, UnixNanos::default());
+        assert!(data.is_empty(), "uncached combo must not emit ticks");
+    }
+
+    #[rstest]
+    fn test_parse_trades_data_mixed_combo_and_per_leg() {
+        // Combo trade and a plain per-leg trade on the underlying perpetual,
+        // both cached, must each produce a tick against their own instrument.
+        let combo_inst = load_combo_option_instrument();
+        let perp_inst = test_perpetual_instrument();
+
+        let mut cache: AHashMap<Ustr, InstrumentAny> = AHashMap::new();
+        cache.insert(Ustr::from("BTC-CS-19MAY26-70000_75000"), combo_inst.clone());
+        cache.insert(Ustr::from("BTC-PERPETUAL"), perp_inst.clone());
+
+        let mut trades = load_combo_trade_msgs();
+        let perp_msgs: Vec<DeribitTradeMsg> = {
+            let json = load_test_json("ws_trades.json");
+            let response: serde_json::Value = serde_json::from_str(&json).unwrap();
+            serde_json::from_value(response["params"]["data"].clone()).unwrap()
+        };
+        trades.extend(perp_msgs);
+
+        let data = parse_trades_data(&trades, &cache, UnixNanos::default());
+        // 1 combo + 2 plain BTC-PERPETUAL trades from the existing fixture.
+        assert_eq!(data.len(), 3);
+
+        let mut combo_ticks = 0;
+        let mut perp_ticks = 0;
+
+        for item in &data {
+            let Data::Trade(tick) = item else {
+                panic!("expected Data::Trade, was {item:?}");
+            };
+
+            if tick.instrument_id == combo_inst.id() {
+                combo_ticks += 1;
+                assert_eq!(tick.trade_id.to_string(), "244365193");
+            } else if tick.instrument_id == perp_inst.id() {
+                perp_ticks += 1;
+            } else {
+                panic!("unexpected instrument_id: {}", tick.instrument_id);
+            }
+        }
+        assert_eq!(combo_ticks, 1);
+        assert_eq!(perp_ticks, 2);
     }
 
     #[rstest]
@@ -1704,8 +1882,13 @@ mod tests {
     }
 
     #[rstest]
-    fn test_parse_chart_msg() {
+    fn test_parse_chart_msg_uses_cost() {
         let instrument = test_perpetual_instrument();
+        assert!(
+            instrument.is_inverse(),
+            "test fixture is expected to be an inverse perp"
+        );
+
         let json = load_test_json("ws_chart.json");
         let response: serde_json::Value = serde_json::from_str(&json).unwrap();
         let chart_msg: DeribitChartMsg =
@@ -1728,6 +1911,7 @@ mod tests {
             bar_type,
             instrument.price_precision(),
             instrument.size_precision(),
+            true, // use_cost_for_volume
             true,
             UnixNanos::default(),
         )
@@ -1738,7 +1922,7 @@ mod tests {
         assert_eq!(bar.high, instrument.make_price(87500.0));
         assert_eq!(bar.low, instrument.make_price(87465.0));
         assert_eq!(bar.close, instrument.make_price(87474.0));
-        assert_eq!(bar.volume, instrument.make_qty(1.0, None)); // Rounded to 1.0 with size_precision=0
+        assert_eq!(bar.volume, instrument.make_qty(83970.0, None));
 
         // ts_event should be close time (open + 1 minute)
         assert_eq!(bar.ts_event, UnixNanos::new(1_767_200_100_000_000_000));
