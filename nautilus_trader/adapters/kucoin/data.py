@@ -86,6 +86,12 @@ class KuCoinDataClient(LiveMarketDataClient):
         self._decoder = msgspec.json.Decoder(KuCoinWsMessage)
         self._subscribed_symbols: set[str] = set()
 
+    def _send_all_instruments_to_data_engine(self) -> None:
+        for instrument in self._instrument_provider.get_all().values():
+            self._handle_data(instrument)
+        for currency in self._instrument_provider.currencies().values():
+            self._cache.add_currency(currency)
+
     # -- Lifecycle -----------------------------------------------------------------------------------
 
     async def _connect(self) -> None:
