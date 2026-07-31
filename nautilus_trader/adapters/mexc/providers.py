@@ -64,7 +64,7 @@ class MexcInstrumentProvider(InstrumentProvider):
         loaded = 0
         skipped = 0
         for symbol in exchange_info.symbols:
-            if symbol.status != "TRADING" or not symbol.isSpotTradingAllowed:
+            if symbol.status != "1" or not symbol.isSpotTradingAllowed:
                 skipped += 1
                 continue
             try:
@@ -83,8 +83,7 @@ class MexcInstrumentProvider(InstrumentProvider):
         instrument_id = InstrumentId(symbol=raw_symbol, venue=MEXC_VENUE)
         ts_now = self._clock.timestamp_ns()
 
-        # quotePrecision is the price decimal places; enforce minimum of 2
-        price_precision = max(symbol.quotePrecision, 2)
+        price_precision = symbol.quotePrecision
         size_precision = symbol.baseAssetPrecision
 
         price_tick = Decimal(10) ** -price_precision
@@ -96,6 +95,12 @@ class MexcInstrumentProvider(InstrumentProvider):
         base_currency = Currency.from_str(symbol.baseAsset)
         quote_currency = Currency.from_str(symbol.quoteAsset)
 
+        taker_fee = (
+            Decimal(symbol.takerCommission)
+            if symbol.takerCommission
+            else _MEXC_TAKER_FEE
+        )
+
         return CurrencyPair(
             instrument_id=instrument_id,
             raw_symbol=raw_symbol,
@@ -105,8 +110,8 @@ class MexcInstrumentProvider(InstrumentProvider):
             size_precision=size_precision,
             price_increment=price_increment,
             size_increment=size_increment,
-            maker_fee=_MEXC_TAKER_FEE,
-            taker_fee=_MEXC_TAKER_FEE,
+            maker_fee=taker_fee,
+            taker_fee=taker_fee,
             ts_event=ts_now,
             ts_init=ts_now,
             info=msgspec.structs.asdict(symbol),

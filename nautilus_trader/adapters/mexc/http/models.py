@@ -52,6 +52,7 @@ class MexcSymbol(msgspec.Struct, omit_defaults=True):
     quoteAssetPrecision: int = 8
     isSpotTradingAllowed: bool = False
     isMarginTradingAllowed: bool = False
+    takerCommission: str | None = None   # decimal string, e.g. "0.0005"
 
 
 class MexcExchangeInfo(msgspec.Struct, omit_defaults=True):
