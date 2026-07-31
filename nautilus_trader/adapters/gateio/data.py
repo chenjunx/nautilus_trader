@@ -150,10 +150,10 @@ class GateIoDataClient(LiveMarketDataClient):
         try:
             quote = QuoteTick(
                 instrument_id=instrument_id,
-                bid_price=Price.from_str(result.b),
-                ask_price=Price.from_str(result.a),
-                bid_size=Quantity.from_str(result.B),
-                ask_size=Quantity.from_str(result.A),
+                bid_price=Price(float(result.b), precision=instrument.price_precision),
+                ask_price=Price(float(result.a), precision=instrument.price_precision),
+                bid_size=Quantity(float(result.B), precision=instrument.size_precision),
+                ask_size=Quantity(float(result.A), precision=instrument.size_precision),
                 ts_event=millis_to_nanos(result.t),
                 ts_init=self._clock.timestamp_ns(),
             )

@@ -176,10 +176,10 @@ class KuCoinDataClient(LiveMarketDataClient):
         try:
             quote = QuoteTick(
                 instrument_id=instrument_id,
-                bid_price=Price.from_str(data.bestBid),
-                ask_price=Price.from_str(data.bestAsk),
-                bid_size=Quantity.from_str(data.bestBidSize),
-                ask_size=Quantity.from_str(data.bestAskSize),
+                bid_price=Price(float(data.bestBid), precision=instrument.price_precision),
+                ask_price=Price(float(data.bestAsk), precision=instrument.price_precision),
+                bid_size=Quantity(float(data.bestBidSize), precision=instrument.size_precision),
+                ask_size=Quantity(float(data.bestAskSize), precision=instrument.size_precision),
                 ts_event=millis_to_nanos(data.time),
                 ts_init=self._clock.timestamp_ns(),
             )

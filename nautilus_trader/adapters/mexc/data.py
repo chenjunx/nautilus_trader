@@ -154,10 +154,10 @@ class MexcDataClient(LiveMarketDataClient):
         try:
             quote = QuoteTick(
                 instrument_id=instrument_id,
-                bid_price=Price.from_str(data.b),
-                ask_price=Price.from_str(data.a),
-                bid_size=Quantity.from_str(data.B),
-                ask_size=Quantity.from_str(data.A),
+                bid_price=Price(float(data.b), precision=instrument.price_precision),
+                ask_price=Price(float(data.a), precision=instrument.price_precision),
+                bid_size=Quantity(float(data.B), precision=instrument.size_precision),
+                ask_size=Quantity(float(data.A), precision=instrument.size_precision),
                 ts_event=ts_event,
                 ts_init=self._clock.timestamp_ns(),
             )
