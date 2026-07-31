@@ -35,11 +35,20 @@ from nautilus_trader.adapters.bybit import BybitDataClientConfig
 from nautilus_trader.adapters.bybit import BybitEnvironment
 from nautilus_trader.adapters.bybit import BybitLiveDataClientFactory
 from nautilus_trader.adapters.bybit import BybitProductType
+from nautilus_trader.adapters.gateio import GATEIO
+from nautilus_trader.adapters.gateio import GateIoDataClientConfig
+from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KRAKEN
 from nautilus_trader.adapters.kraken import KrakenDataClientConfig
 from nautilus_trader.adapters.kraken import KrakenEnvironment
 from nautilus_trader.adapters.kraken import KrakenLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KrakenProductType
+from nautilus_trader.adapters.kucoin import KUCOIN
+from nautilus_trader.adapters.kucoin import KuCoinDataClientConfig
+from nautilus_trader.adapters.kucoin import KuCoinLiveDataClientFactory
+from nautilus_trader.adapters.mexc import MEXC
+from nautilus_trader.adapters.mexc import MexcDataClientConfig
+from nautilus_trader.adapters.mexc import MexcLiveDataClientFactory
 from nautilus_trader.adapters.okx import OKX
 from nautilus_trader.adapters.okx import OKXDataClientConfig
 from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
@@ -64,7 +73,7 @@ MAIN_SPOT_VENUES = {str(BINANCE), str(BYBIT), str(OKX)}
 MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(BYBIT), str(OKX)}  # Binance 永续在独立 venue
 
 # 副所（仅现货）
-SECONDARY_VENUES = {str(KRAKEN)}
+SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(KUCOIN), str(MEXC)}
 
 # 黑名单：流动性过高，套利竞争激烈
 BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
@@ -418,6 +427,15 @@ def main() -> None:
                 product_types=(KrakenProductType.SPOT,),
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
+            GATEIO: GateIoDataClientConfig(
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
+            KUCOIN: KuCoinDataClientConfig(
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
+            MEXC: MexcDataClientConfig(
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
         },
         strategies=[],
     )
@@ -440,6 +458,9 @@ def main() -> None:
     node.add_data_client_factory(BYBIT, BybitLiveDataClientFactory)
     node.add_data_client_factory(OKX, OKXLiveDataClientFactory)
     node.add_data_client_factory(KRAKEN, KrakenLiveDataClientFactory)
+    node.add_data_client_factory(GATEIO, GateIoLiveDataClientFactory)
+    node.add_data_client_factory(KUCOIN, KuCoinLiveDataClientFactory)
+    node.add_data_client_factory(MEXC, MexcLiveDataClientFactory)
     node.build()
     node.trader.add_strategy(monitor)
     node.run()
