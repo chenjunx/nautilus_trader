@@ -74,12 +74,22 @@ ALL_SPOT_VENUES = MAIN_SPOT_VENUES | SECONDARY_VENUES
 BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 
 
-def parse_fees_arg(fees_str: str, default: float) -> dict[str, float]:
+# 各所折扣后 taker 费率默认值
+DEFAULT_FEES: dict[str, float] = {
+    str(BINANCE): 0.00075,   # BNB 折扣后
+    str(BYBIT):   0.00060,   # VIP1
+    str(KRAKEN):  0.00050,   # 30天量 >$50k
+    str(GATEIO):  0.00080,
+    str(MEXC):    0.00100,   # 无明显折扣
+}
+
+
+def parse_fees_arg(fees_str: str) -> dict[str, float]:
     """
     Parse --fees argument like "BINANCE=0.001,KRAKEN=0.002"
-    into {venue_name: fee_rate}.
+    into {venue_name: fee_rate}. 未指定的所使用 DEFAULT_FEES。
     """
-    result = {v: default for v in list(MAIN_SPOT_VENUES | SECONDARY_VENUES)}
+    result = dict(DEFAULT_FEES)  # 以各所默认值为基础
     if not fees_str:
         return result
     for part in fees_str.split(","):
@@ -377,16 +387,14 @@ def main() -> None:
     parser.add_argument("--summary", type=int, default=30,
                         help="汇总排名打印间隔秒数（默认 30）")
     parser.add_argument("--fees", type=str, default="",
-                        help="手续费，格式: BINANCE=0.001,KRAKEN=0.002（默认全部 0.1%%）")
-    parser.add_argument("--default-fee", type=float, default=0.001,
-                        help="默认手续费（默认 0.001 = 0.1%%）")
+                        help="覆盖手续费，格式: BINANCE=0.00075,KRAKEN=0.0005（默认各所折扣后费率）")
     parser.add_argument("--slippage", type=float, default=0.0002,
                         help="单边滑点估算（默认 0.0002 = 0.02%%）")
     parser.add_argument("--alert-only", action="store_true",
                         help="只在 net>0 时输出，适合后台运行")
     args = parser.parse_args()
 
-    venue_fees = parse_fees_arg(args.fees, args.default_fee)
+    venue_fees = parse_fees_arg(args.fees)
     print("[fees] 使用手续费率:")
     for v, f in venue_fees.items():
         print(f"  {v}: {f*100:.4f}%")
