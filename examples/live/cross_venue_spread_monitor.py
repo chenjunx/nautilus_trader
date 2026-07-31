@@ -75,6 +75,7 @@ class SpreadMonitorConfig(StrategyConfig, frozen=True):
     throttle_secs: float = 2.0
     summary_interval: int = 30
     slippage: float = 0.0005          # 单边滑点，默认 0.05%
+    alert_only: bool = False          # 只在 net > 0 时输出，关闭定时汇总
     # JSON: {venue_name: default_taker_fee} — per-instrument fee from cache takes priority
     venue_fees_json: str = "{}"
 
@@ -94,6 +95,7 @@ class SpreadMonitor(Strategy):
         self._throttle = config.throttle_secs
         self._summary_interval = config.summary_interval
         self._slippage = config.slippage
+        self._alert_only = config.alert_only
         # {venue_name: default_fee}
         self._venue_defaults: dict[str, float] = json.loads(config.venue_fees_json)
 
@@ -124,16 +126,18 @@ class SpreadMonitor(Strategy):
             if set(VENUE_NAMES).issubset(vm.keys())
         }
 
-        print(f"\n{'='*72}")
-        print(f"[SpreadMonitor] 三所共有 USDC 现货对: {len(common)} 个")
-        print(f"[SpreadMonitor] 净价差阈值: {self._min_net_pct}%  | 刷新间隔: {self._throttle}s  | 单边滑点: {self._slippage*100:.4f}%")
-
-        # Print which fee source is being used per venue
-        for venue in VENUE_NAMES:
-            default = self._venue_defaults.get(venue, 0.001)
-            print(f"[SpreadMonitor] {venue} 手续费默认: {default*100:.4f}%"
-                  f"{'（instrument 对象中有实际费率的品种以实际为准）' if venue == str(BINANCE) else ''}")
-        print(f"{'='*72}\n")
+        if self._alert_only:
+            print(f"[SpreadMonitor] alert-only 模式，仅在 net>0 时输出 | "
+                  f"品种数={len(common)} | 滑点={self._slippage*100:.4f}%")
+        else:
+            print(f"\n{'='*72}")
+            print(f"[SpreadMonitor] 三所共有 USDC 现货对: {len(common)} 个")
+            print(f"[SpreadMonitor] 净价差阈值: {self._min_net_pct}%  | 刷新间隔: {self._throttle}s  | 单边滑点: {self._slippage*100:.4f}%")
+            for venue in VENUE_NAMES:
+                default = self._venue_defaults.get(venue, 0.001)
+                print(f"[SpreadMonitor] {venue} 手续费默认: {default*100:.4f}%"
+                      f"{'（instrument 对象中有实际费率的品种以实际为准）' if venue == str(BINANCE) else ''}")
+            print(f"{'='*72}\n")
 
         for base, venue_map in sorted(common.items()):
             for venue, inst_id in venue_map.items():
@@ -165,7 +169,7 @@ class SpreadMonitor(Strategy):
             return  # wait until all venues have data
 
         now = time.monotonic()
-        if now - self._last_summary >= self._summary_interval:
+        if not self._alert_only and now - self._last_summary >= self._summary_interval:
             self._last_summary = now
             self._print_summary()
 
@@ -177,7 +181,8 @@ class SpreadMonitor(Strategy):
             return
 
         gross_pct, net_pct, buy_v, buy_ask, fee_b, sell_v, sell_bid, fee_s = result
-        if net_pct < self._min_net_pct:
+        min_pct = 0.0 if self._alert_only else self._min_net_pct
+        if net_pct < min_pct:
             return
 
         self._last_print[base] = now
@@ -322,6 +327,10 @@ def main() -> None:
         "--slippage", type=float, default=0.0005,
         help="单边滑点估算（默认 0.0005 = 0.05%%，双边合计 0.1%%）",
     )
+    parser.add_argument(
+        "--alert-only", action="store_true",
+        help="只在 net>0 时输出，关闭定时汇总，适合后台运行",
+    )
     args = parser.parse_args()
 
     venue_fees = parse_fees_arg(args.fees, args.default_fee)
@@ -360,6 +369,7 @@ def main() -> None:
             throttle_secs=args.throttle,
             summary_interval=args.summary,
             slippage=args.slippage,
+            alert_only=args.alert_only,
             venue_fees_json=json.dumps(venue_fees),
         )
     )
