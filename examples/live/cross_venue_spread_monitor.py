@@ -97,7 +97,7 @@ class SpreadMonitorConfig(StrategyConfig, frozen=True):
     min_net_spread_pct: float = 0.0
     throttle_secs: float = 2.0
     summary_interval: int = 30
-    slippage: float = 0.0005
+    slippage: float = 0.0002
     alert_only: bool = False
     venue_fees_json: str = "{}"
 
@@ -380,8 +380,8 @@ def main() -> None:
                         help="手续费，格式: BINANCE=0.001,KRAKEN=0.002（默认全部 0.1%%）")
     parser.add_argument("--default-fee", type=float, default=0.001,
                         help="默认手续费（默认 0.001 = 0.1%%）")
-    parser.add_argument("--slippage", type=float, default=0.0005,
-                        help="单边滑点估算（默认 0.0005 = 0.05%%）")
+    parser.add_argument("--slippage", type=float, default=0.0002,
+                        help="单边滑点估算（默认 0.0002 = 0.02%%）")
     parser.add_argument("--alert-only", action="store_true",
                         help="只在 net>0 时输出，适合后台运行")
     args = parser.parse_args()
