@@ -23,6 +23,7 @@ from nautilus_trader.adapters.gateio.constants import GATEIO_VENUE
 from nautilus_trader.adapters.gateio.http.client import GateIoHttpClient
 from nautilus_trader.adapters.gateio.providers import GateIoInstrumentProvider
 from nautilus_trader.adapters.gateio.websocket.client import GateIoWebSocketClient
+from nautilus_trader.adapters.gateio.websocket.schemas import GateIoBookTickerResult
 from nautilus_trader.adapters.gateio.websocket.schemas import GateIoWsMessage
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
@@ -90,6 +91,7 @@ class GateIoDataClient(LiveMarketDataClient):
         )
 
         self._decoder = msgspec.json.Decoder(GateIoWsMessage)
+        self._decoder_ticker = msgspec.json.Decoder(GateIoBookTickerResult)
         self._subscribed_symbols: set[str] = set()
 
     def _send_all_instruments_to_data_engine(self) -> None:
@@ -137,8 +139,13 @@ class GateIoDataClient(LiveMarketDataClient):
         if msg.event != "update" or msg.channel != "spot.book_ticker":
             return
 
-        result = msg.result
-        if result is None:
+        if msg.result is None:
+            return
+
+        try:
+            result = self._decoder_ticker.decode(msg.result)
+        except Exception as e:
+            self._log.warning(f"Failed to decode ticker result: {e!r}")
             return
 
         instrument_id = InstrumentId.from_str(f"{result.s}.GATEIO")
