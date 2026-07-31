@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cross-venue USDT spot spread monitor - main vs secondary venues.
-监控主所（Binance/OKX/Bybit）与副所（Kraken 等）之间的 USDT 现货价差。
+监控主所（Binance/Bybit）与副所（Kraken 等）之间的 USDT 现货价差。
 
 筛选规则:
   1. 币种在任意主所同时有 USDT 现货 + USDT 永续
@@ -46,15 +46,10 @@ from nautilus_trader.adapters.kraken import KrakenProductType
 from nautilus_trader.adapters.mexc import MEXC
 from nautilus_trader.adapters.mexc import MexcDataClientConfig
 from nautilus_trader.adapters.mexc import MexcLiveDataClientFactory
-from nautilus_trader.adapters.okx import OKX
-from nautilus_trader.adapters.okx import OKXDataClientConfig
-from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
-from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
-from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.instruments import CryptoPerpetual
@@ -66,8 +61,8 @@ from nautilus_trader.trading.strategy import Strategy
 BINANCE_FUT_KEY = "BINANCE_FUT"
 
 # 主所（有永续 + 现货）
-MAIN_SPOT_VENUES = {str(BINANCE), str(BYBIT), str(OKX)}
-MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(BYBIT), str(OKX)}  # Binance 永续在独立 venue
+MAIN_SPOT_VENUES = {str(BINANCE), str(BYBIT)}
+MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(BYBIT)}
 
 # 副所（仅现货）
 SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(MEXC)}
@@ -414,11 +409,6 @@ def main() -> None:
                 product_types=(BybitProductType.SPOT, BybitProductType.LINEAR),
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
-            OKX: OKXDataClientConfig(
-                environment=OKXEnvironment.LIVE,
-                instrument_types=frozenset({OKXInstrumentType.SPOT, OKXInstrumentType.SWAP}),
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
             # 副所现货
             KRAKEN: KrakenDataClientConfig(
                 environment=KrakenEnvironment.LIVE,
@@ -451,7 +441,6 @@ def main() -> None:
     node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
     node.add_data_client_factory(BINANCE_FUT_KEY, BinanceLiveDataClientFactory)
     node.add_data_client_factory(BYBIT, BybitLiveDataClientFactory)
-    node.add_data_client_factory(OKX, OKXLiveDataClientFactory)
     node.add_data_client_factory(KRAKEN, KrakenLiveDataClientFactory)
     node.add_data_client_factory(GATEIO, GateIoLiveDataClientFactory)
     node.add_data_client_factory(MEXC, MexcLiveDataClientFactory)
