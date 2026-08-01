@@ -70,7 +70,7 @@ class MexcWebSocketClient:
         config = WebSocketConfig(
             url=self._url,
             headers=[],
-            heartbeat=None,
+            heartbeat=_HEARTBEAT_INTERVAL,  # Rust 层发协议级 PING，比 Python sleep 更可靠
             proxy_url=None,
         )
         self._client = await WebSocketClient.connect(
