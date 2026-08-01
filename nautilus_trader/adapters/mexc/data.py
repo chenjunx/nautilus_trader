@@ -131,12 +131,14 @@ class MexcDataClient(LiveMarketDataClient):
             return
 
         # 服务端主动发 PING，必须回 PONG，否则服务器断连
-        if msg.method == "PING":
+        if msg.method and msg.method.upper() == "PING":
+            self._log.debug(f"Server PING received, sending PONG | raw={raw!r}")
             self._loop.create_task(self._ws_client._send({"method": "PONG"}))
             return
 
         # Control messages (subscription confirmations, PONG, etc.) have no `d` field
         if msg.d is None:
+            self._log.debug(f"Control message received | raw={raw!r}")
             return
 
         data = msg.d
