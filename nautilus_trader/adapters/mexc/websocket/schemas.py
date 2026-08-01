@@ -61,5 +61,6 @@ class MexcWsMessage(msgspec.Struct, omit_defaults=True):
 
     c: str | None = None
     d: MexcBookTickerData | None = None
+    method: str | None = None   # 服务端控制消息字段，如 "PING"
     s: str | None = None
     t: int | None = None

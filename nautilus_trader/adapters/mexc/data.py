@@ -130,6 +130,11 @@ class MexcDataClient(LiveMarketDataClient):
             self._log.warning(f"Failed to decode WS message: {e!r} | {raw!r}")
             return
 
+        # 服务端主动发 PING，必须回 PONG，否则服务器断连
+        if msg.method == "PING":
+            self._loop.create_task(self._ws_client._send({"method": "PONG"}))
+            return
+
         # Control messages (subscription confirmations, PONG, etc.) have no `d` field
         if msg.d is None:
             return
