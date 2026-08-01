@@ -402,7 +402,7 @@ def main() -> None:
 
     config_node = TradingNodeConfig(
         trader_id="SPREAD-MONITOR-001",
-        logging=LoggingConfig(log_level="WARNING"),
+        logging=LoggingConfig(log_level="INFO"),
         data_clients={
             # 主所现货
             BINANCE: BinanceDataClientConfig(
