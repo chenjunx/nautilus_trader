@@ -16,51 +16,27 @@
 import msgspec
 
 
-class MexcBookTickerData(msgspec.Struct, omit_defaults=True):
-    """
-    MEXC spot book ticker data payload (``d`` field of WS message).
-
-    Fields
-    ------
-    a : str
-        Best ask price.
-    A : str
-        Best ask size.
-    b : str
-        Best bid price.
-    B : str
-        Best bid size.
-    s : str
-        Symbol, e.g. "BTCUSDT".
-
-    """
-
-    a: str   # best ask price
-    A: str   # best ask size
-    b: str   # best bid price
-    B: str   # best bid size
-    s: str   # symbol
-
-
 class MexcWsMessage(msgspec.Struct, omit_defaults=True):
     """
-    Top-level MEXC WebSocket frame.
+    MEXC WebSocket control-plane frame (JSON text).
+
+    Market data pushes for ``*.pb`` channels arrive as protobuf binary frames
+    and are decoded separately, see ``nautilus_trader.adapters.mexc.websocket.protobuf``.
 
     Fields
     ------
-    c : str, optional
-        Channel name, e.g. "spot@public.bookTicker.v3.api@BTCUSDT".
-    d : MexcBookTickerData, optional
-        Data payload (present for ticker updates, absent for control messages).
-    s : str, optional
-        Symbol (top-level mirror of ``d.s``).
-    t : int, optional
-        Server timestamp in milliseconds.
+    id : int, optional
+        Request id echoed back for subscribe/unsubscribe acknowledgements.
+    code : int, optional
+        Result code, 0 on success.
+    msg : str, optional
+        Human-readable result message, e.g. subscription confirmation or error reason.
+    method : str, optional
+        Server-initiated control message, e.g. "PING".
 
     """
 
-    c: str | None = None
-    d: MexcBookTickerData | None = None
+    id: int | None = None
+    code: int | None = None
+    msg: str | None = None
     method: str | None = None   # 服务端控制消息字段，如 "PING"
-    s: str | None = None
-    t: int | None = None

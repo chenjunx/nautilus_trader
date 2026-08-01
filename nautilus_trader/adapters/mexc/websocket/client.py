@@ -143,7 +143,7 @@ class MexcWebSocketClient:
             self._log.warning(f"WebSocket send error: {e!s}")
 
     def _channel_name(self, symbol: str) -> str:
-        return f"spot@public.bookTicker.v3.api@{symbol}"
+        return f"spot@public.bookTicker.batch.v3.api.pb@{symbol}"
 
     async def subscribe_book_ticker(self, symbols: list[str]) -> None:
         """Subscribe to spot book ticker updates for the given symbols."""

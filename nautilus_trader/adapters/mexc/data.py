@@ -20,9 +20,11 @@ import msgspec
 from nautilus_trader.adapters.mexc.config import MexcDataClientConfig
 from nautilus_trader.adapters.mexc.constants import MEXC_CLIENT_ID
 from nautilus_trader.adapters.mexc.constants import MEXC_VENUE
+from nautilus_trader.adapters.mexc.constants import MEXC_WS_BASE_URL
 from nautilus_trader.adapters.mexc.http.client import MexcHttpClient
 from nautilus_trader.adapters.mexc.providers import MexcInstrumentProvider
 from nautilus_trader.adapters.mexc.websocket.client import MexcWebSocketClient
+from nautilus_trader.adapters.mexc.websocket.protobuf import decode_book_ticker_batch
 from nautilus_trader.adapters.mexc.websocket.schemas import MexcWsMessage
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
@@ -81,7 +83,7 @@ class MexcDataClient(LiveMarketDataClient):
             instrument_provider=instrument_provider,
         )
 
-        ws_url = config.base_url_ws or "wss://wbs.mexc.com/ws"
+        ws_url = config.base_url_ws or MEXC_WS_BASE_URL
         self._ws_client = MexcWebSocketClient(
             loop=loop,
             url=ws_url,
@@ -124,10 +126,18 @@ class MexcDataClient(LiveMarketDataClient):
     # -- WebSocket message handler ---------------------------------------------------------------
 
     def _handle_ws_message(self, raw: bytes) -> None:
+        # Control-plane messages (subscribe acks, PING/PONG, errors) are JSON text;
+        # `*.pb` market data pushes are protobuf binary frames on the same connection.
+        if raw.startswith(b"{"):
+            self._handle_control_message(raw)
+        else:
+            self._handle_book_ticker_message(raw)
+
+    def _handle_control_message(self, raw: bytes) -> None:
         try:
             msg = self._decoder.decode(raw)
         except Exception as e:
-            self._log.warning(f"Failed to decode WS message: {e!r} | {raw!r}")
+            self._log.warning(f"Failed to decode WS control message: {e!r} | {raw!r}")
             return
 
         # 服务端主动发 PING，必须回 PONG，否则服务器断连
@@ -136,43 +146,49 @@ class MexcDataClient(LiveMarketDataClient):
             self._loop.create_task(self._ws_client._send({"method": "PONG"}))
             return
 
-        # Control messages (subscription confirmations, PONG, etc.) have no `d` field
-        if msg.d is None:
-            self._log.debug(f"Control message received | raw={raw!r}")
+        if msg.code is not None and msg.code != 0:
+            self._log.warning(f"Subscription request failed: {msg.msg!r}")
             return
 
-        data = msg.d
-        # Prefer top-level symbol field; fall back to data payload symbol
-        raw_symbol = msg.s or data.s
-        ts_ms = msg.t
+        self._log.debug(f"Control message received | raw={raw!r}")
 
-        if not raw_symbol:
-            self._log.debug("WS message missing symbol, dropping")
+    def _handle_book_ticker_message(self, raw: bytes) -> None:
+        try:
+            channel, send_time_ms, items = decode_book_ticker_batch(raw)
+        except Exception as e:
+            self._log.warning(f"Failed to decode WS market data message: {e!r} | {raw!r}")
             return
 
+        if not items:
+            return
+
+        raw_symbol = channel.rsplit("@", maxsplit=1)[-1]
         instrument_id = InstrumentId.from_str(f"{raw_symbol}.MEXC")
         instrument = self._cache.instrument(instrument_id)
         if instrument is None:
             self._log.debug(f"No instrument found for {instrument_id}, dropping tick")
             return
 
-        ts_event = millis_to_nanos(ts_ms) if ts_ms is not None else self._clock.timestamp_ns()
+        ts_event = (
+            millis_to_nanos(send_time_ms) if send_time_ms is not None else self._clock.timestamp_ns()
+        )
 
-        try:
-            quote = QuoteTick(
-                instrument_id=instrument_id,
-                bid_price=Price(float(data.b), precision=instrument.price_precision),
-                ask_price=Price(float(data.a), precision=instrument.price_precision),
-                bid_size=Quantity(float(data.B), precision=instrument.size_precision),
-                ask_size=Quantity(float(data.A), precision=instrument.size_precision),
-                ts_event=ts_event,
-                ts_init=self._clock.timestamp_ns(),
-            )
-        except Exception as e:
-            self._log.warning(f"Failed to build QuoteTick for {raw_symbol}: {e!r}")
-            return
+        for item in items:
+            try:
+                quote = QuoteTick(
+                    instrument_id=instrument_id,
+                    bid_price=Price(float(item.bid_price), precision=instrument.price_precision),
+                    ask_price=Price(float(item.ask_price), precision=instrument.price_precision),
+                    bid_size=Quantity(float(item.bid_qty), precision=instrument.size_precision),
+                    ask_size=Quantity(float(item.ask_qty), precision=instrument.size_precision),
+                    ts_event=ts_event,
+                    ts_init=self._clock.timestamp_ns(),
+                )
+            except Exception as e:
+                self._log.warning(f"Failed to build QuoteTick for {raw_symbol}: {e!r}")
+                continue
 
-        self._handle_data(quote)
+            self._handle_data(quote)
 
     async def _resubscribe(self) -> None:
         """Re-subscribe to all active streams after reconnection."""

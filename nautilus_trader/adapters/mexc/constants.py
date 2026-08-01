@@ -22,4 +22,4 @@ MEXC_VENUE = Venue("MEXC")
 MEXC_CLIENT_ID = ClientId("MEXC")
 
 MEXC_HTTP_BASE_URL = "https://api.mexc.com"
-MEXC_WS_BASE_URL = "wss://wbs.mexc.com/ws"
+MEXC_WS_BASE_URL = "wss://wbs-api.mexc.com/ws"
