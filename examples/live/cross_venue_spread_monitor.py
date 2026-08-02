@@ -43,13 +43,21 @@ from nautilus_trader.adapters.kraken import KrakenDataClientConfig
 from nautilus_trader.adapters.kraken import KrakenEnvironment
 from nautilus_trader.adapters.kraken import KrakenLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KrakenProductType
+from nautilus_trader.adapters.kucoin import KUCOIN
+from nautilus_trader.adapters.kucoin import KuCoinDataClientConfig
+from nautilus_trader.adapters.kucoin import KuCoinLiveDataClientFactory
 from nautilus_trader.adapters.mexc import MEXC
 from nautilus_trader.adapters.mexc import MexcDataClientConfig
 from nautilus_trader.adapters.mexc import MexcLiveDataClientFactory
+from nautilus_trader.adapters.okx import OKX
+from nautilus_trader.adapters.okx import OKXDataClientConfig
+from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
+from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.instruments import CryptoPerpetual
@@ -61,11 +69,11 @@ from nautilus_trader.trading.strategy import Strategy
 BINANCE_FUT_KEY = "BINANCE_FUT"
 
 # 主所（有永续 + 现货）
-MAIN_SPOT_VENUES = {str(BINANCE), str(BYBIT)}
-MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(BYBIT)}
+MAIN_SPOT_VENUES = {str(BINANCE), str(BYBIT), str(OKX)}
+MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(BYBIT), str(OKX)}
 
 # 副所（仅现货）
-SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(MEXC)}
+SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(MEXC), str(KUCOIN)}
 
 # 白名单模式：在原规则基础上，进一步要求五个现货所都有该币
 ALL_SPOT_VENUES = MAIN_SPOT_VENUES | SECONDARY_VENUES
@@ -78,9 +86,11 @@ BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 DEFAULT_FEES: dict[str, float] = {
     str(BINANCE): 0.00075,   # BNB 折扣后
     str(BYBIT):   0.00060,   # VIP1
+    str(OKX):     0.00080,   # Lv1 折扣后
     str(KRAKEN):  0.00050,   # 30天量 >$50k
     str(GATEIO):  0.00080,
     str(MEXC):    0.00100,   # 无明显折扣
+    str(KUCOIN):  0.00080,
 }
 
 
@@ -423,6 +433,12 @@ def main() -> None:
                 product_types=(BybitProductType.SPOT, BybitProductType.LINEAR),
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
+            # 主所现货 + 永续（OKX SWAP 为永续合约）
+            OKX: OKXDataClientConfig(
+                environment=OKXEnvironment.LIVE,
+                instrument_types=(OKXInstrumentType.SPOT, OKXInstrumentType.SWAP),
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
             # 副所现货
             KRAKEN: KrakenDataClientConfig(
                 environment=KrakenEnvironment.LIVE,
@@ -433,6 +449,9 @@ def main() -> None:
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
             MEXC: MexcDataClientConfig(
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
+            KUCOIN: KuCoinDataClientConfig(
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
         },
@@ -455,9 +474,11 @@ def main() -> None:
     node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
     node.add_data_client_factory(BINANCE_FUT_KEY, BinanceLiveDataClientFactory)
     node.add_data_client_factory(BYBIT, BybitLiveDataClientFactory)
+    node.add_data_client_factory(OKX, OKXLiveDataClientFactory)
     node.add_data_client_factory(KRAKEN, KrakenLiveDataClientFactory)
     node.add_data_client_factory(GATEIO, GateIoLiveDataClientFactory)
     node.add_data_client_factory(MEXC, MexcLiveDataClientFactory)
+    node.add_data_client_factory(KUCOIN, KuCoinLiveDataClientFactory)
     node.build()
     node.trader.add_strategy(monitor)
     node.run()
