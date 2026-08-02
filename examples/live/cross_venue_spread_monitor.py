@@ -203,8 +203,8 @@ class SpreadMonitor(Strategy):
                 "secondary_spot": secondary_spot[base],
             }
 
-        # 打印配对详情
-        print(f"\n{'='*72}")
+        # 打印配对详情及各所合约规格
+        print(f"\n{'='*88}")
         print(f"[SpreadMonitor] 配对完成，共 {len(qualifying)} 个 USDT 交易对")
         print(f"  主所: {MAIN_SPOT_VENUES}  副所: {SECONDARY_VENUES}")
         if not self._alert_only:
@@ -212,10 +212,23 @@ class SpreadMonitor(Strategy):
         print()
         for base in sorted(qualifying):
             info = qualifying[base]
-            main_vs = sorted(info["main_spot"].keys())
-            sec_vs = sorted(info["secondary_spot"].keys())
-            print(f"  {base+'/USDT':<16} 主所: {', '.join(main_vs):<30} 副所: {', '.join(sec_vs)}")
-        print(f"{'='*72}\n")
+            all_insts: dict[str, object] = {**info["main_spot"], **info["secondary_spot"]}
+            print(f"  {base}/USDT")
+            for venue in sorted(all_insts):
+                inst = all_insts[venue]
+                role = "主" if venue in MAIN_SPOT_VENUES else "副"
+                min_n = inst.min_notional
+                max_q = inst.max_quantity
+                min_q = inst.min_quantity
+                print(
+                    f"    [{role}] {venue:<12} "
+                    f"价格步长={inst.price_increment}  "
+                    f"数量步长={inst.size_increment}  "
+                    f"最小名义={min_n if min_n is not None else 'N/A':>12}  "
+                    f"最大单量={max_q if max_q is not None else 'N/A':>14}  "
+                    f"最小单量={min_q if min_q is not None else 'N/A'}"
+                )
+        print(f"{'='*88}\n")
 
         # 订阅现货行情
         for base, info in sorted(qualifying.items()):
