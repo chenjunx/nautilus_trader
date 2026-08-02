@@ -34,6 +34,9 @@ from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.adapters.bitfinex import BITFINEX
 from nautilus_trader.adapters.bitfinex import BitfinexDataClientConfig
 from nautilus_trader.adapters.bitfinex import BitfinexLiveDataClientFactory
+from nautilus_trader.adapters.okx import OKX
+from nautilus_trader.adapters.okx import OKXDataClientConfig
+from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.adapters.gateio import GATEIO
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
@@ -44,6 +47,8 @@ from nautilus_trader.adapters.kraken import KrakenLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KrakenProductType
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
+from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
@@ -57,8 +62,8 @@ from nautilus_trader.trading.strategy import Strategy
 BINANCE_FUT_KEY = "BINANCE_FUT"
 
 # 主所（有永续 + 现货）
-MAIN_SPOT_VENUES = {str(BINANCE)}
-MAIN_PERP_VENUES = {BINANCE_FUT_KEY}
+MAIN_SPOT_VENUES = {str(BINANCE), str(OKX)}
+MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(OKX)}
 
 # 副所（仅现货）
 SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(BITFINEX)}
@@ -70,6 +75,7 @@ BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 # 各所折扣后 taker 费率默认值
 DEFAULT_FEES: dict[str, float] = {
     str(BINANCE): 0.00075,   # BNB 折扣后
+    str(OKX):     0.00080,   # Lv1 折扣后
     str(KRAKEN):   0.00050,   # 30天量 >$50k
     str(GATEIO):   0.00080,
     str(BITFINEX): 0.00200,   # 标准 taker 0.2%
@@ -514,6 +520,12 @@ def main() -> None:
                 account_type=BinanceAccountType.USDT_FUTURES,
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
+            # 主所现货 + 永续
+            OKX: OKXDataClientConfig(
+                environment=OKXEnvironment.LIVE,
+                instrument_types=frozenset({OKXInstrumentType.SPOT, OKXInstrumentType.SWAP}),
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
             # 副所现货
             KRAKEN: KrakenDataClientConfig(
                 environment=KrakenEnvironment.LIVE,
@@ -545,6 +557,7 @@ def main() -> None:
     node = TradingNode(config=config_node)
     node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
     node.add_data_client_factory(BINANCE_FUT_KEY, BinanceLiveDataClientFactory)
+    node.add_data_client_factory(OKX, OKXLiveDataClientFactory)
     node.add_data_client_factory(KRAKEN, KrakenLiveDataClientFactory)
     node.add_data_client_factory(GATEIO, GateIoLiveDataClientFactory)
     node.add_data_client_factory(BITFINEX, BitfinexLiveDataClientFactory)
