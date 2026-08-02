@@ -63,9 +63,6 @@ MAIN_PERP_VENUES = {BINANCE_FUT_KEY}
 # 副所（仅现货）
 SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(BITFINEX)}
 
-# 白名单模式：在原规则基础上，进一步要求五个现货所都有该币
-ALL_SPOT_VENUES = MAIN_SPOT_VENUES | SECONDARY_VENUES
-
 # 黑名单：流动性过高，套利竞争激烈
 BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 
@@ -194,10 +191,6 @@ class SpreadMonitor(Strategy):
                not (main_spot_venues and main_perp_venues):
                 # 宽松判断：任意主所有现货 且 任意主所（可不同）有永续
                 pass
-            # 白名单模式：五个现货所都有才配对
-            all_spot_venues_for_base = set(main_spot[base]) | set(secondary_spot[base])
-            if not ALL_SPOT_VENUES.issubset(all_spot_venues_for_base):
-                continue
 
             qualifying[base] = {
                 "main_spot": main_spot[base],
