@@ -24,6 +24,7 @@ from nautilus_trader.adapters.bitfinex.constants import BITFINEX_WS_BASE_URL
 from nautilus_trader.adapters.bitfinex.http.client import BitfinexHttpClient
 from nautilus_trader.adapters.bitfinex.providers import BitfinexInstrumentProvider
 from nautilus_trader.adapters.bitfinex.providers import bitfinex_pair_to_nautilus
+from nautilus_trader.adapters.bitfinex.providers import nautilus_to_bitfinex_pair
 from nautilus_trader.adapters.bitfinex.websocket.client import BitfinexWebSocketClient
 from nautilus_trader.adapters.bitfinex.websocket.schemas import BitfinexEventMessage
 from nautilus_trader.cache.cache import Cache
@@ -120,13 +121,15 @@ class BitfinexDataClient(LiveMarketDataClient):
     # -- Subscriptions ---------------------------------------------------------------------------
 
     async def _subscribe_quote_ticks(self, command: SubscribeQuoteTicks) -> None:
-        symbol = command.instrument_id.symbol.value  # e.g. "BTCUSD"
+        symbol = command.instrument_id.symbol.value  # Nautilus symbol e.g. "BTCUSDT"
         if symbol not in self._subscribed_symbols:
             self._subscribed_symbols.add(symbol)
-            await self._ws_client.subscribe_ticker(symbol)
+            # Convert back to Bitfinex native before sending WS subscribe
+            bitfinex_native = nautilus_to_bitfinex_pair(symbol)  # e.g. "BTCUST"
+            await self._ws_client.subscribe_ticker(bitfinex_native)
 
     async def _unsubscribe_quote_ticks(self, command: UnsubscribeQuoteTicks) -> None:
-        symbol = command.instrument_id.symbol.value
+        symbol = command.instrument_id.symbol.value  # Nautilus symbol
         if symbol in self._symbol_chan_map:
             chan_id = self._symbol_chan_map.pop(symbol)
             self._channel_map.pop(chan_id, None)
@@ -159,17 +162,19 @@ class BitfinexDataClient(LiveMarketDataClient):
 
         if msg.event == "subscribed":
             if msg.chanId is not None and msg.pair:
-                self._channel_map[msg.chanId] = msg.pair
-                self._symbol_chan_map[msg.pair] = msg.chanId
+                # Store both maps keyed by Nautilus symbol for consistent lookup
+                nautilus_sym = bitfinex_pair_to_nautilus(msg.pair)
+                self._channel_map[msg.chanId] = msg.pair          # chanId → Bitfinex native
+                self._symbol_chan_map[nautilus_sym] = msg.chanId  # Nautilus symbol → chanId
                 self._log.debug(
-                    f"Channel registered: chanId={msg.chanId} pair={msg.pair}"
+                    f"Channel registered: chanId={msg.chanId} pair={msg.pair} → {nautilus_sym}"
                 )
 
         elif msg.event == "unsubscribed":
             if msg.chanId is not None:
-                pair = self._channel_map.pop(msg.chanId, None)
-                if pair is not None:
-                    self._symbol_chan_map.pop(pair, None)
+                raw_pair = self._channel_map.pop(msg.chanId, None)
+                if raw_pair is not None:
+                    self._symbol_chan_map.pop(bitfinex_pair_to_nautilus(raw_pair), None)
                 self._log.debug(f"Channel removed: chanId={msg.chanId}")
 
         elif msg.event == "error":
@@ -223,7 +228,7 @@ class BitfinexDataClient(LiveMarketDataClient):
                 ts_init=self._clock.timestamp_ns(),
             )
         except Exception as e:
-            self._log.warning(f"Failed to build QuoteTick for {pair}: {e!r}")
+            self._log.warning(f"Failed to build QuoteTick for {nautilus_symbol}: {e!r}")
             return
 
         self._handle_data(quote)

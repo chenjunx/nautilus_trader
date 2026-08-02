@@ -36,6 +36,9 @@ _CURRENCY_REMAP: dict[str, str] = {
     "EUT": "EURT",   # Tether EUR
 }
 
+# Reverse map: Nautilus canonical → Bitfinex native code
+_CURRENCY_REMAP_INV: dict[str, str] = {v: k for k, v in _CURRENCY_REMAP.items()}
+
 
 def bitfinex_pair_to_nautilus(pair: str) -> str:
     """Convert a raw Bitfinex pair string to the Nautilus symbol string.
@@ -48,6 +51,19 @@ def bitfinex_pair_to_nautilus(pair: str) -> str:
         return f"{_CURRENCY_REMAP.get(base, base)}:{_CURRENCY_REMAP.get(quote, quote)}"
     base, quote = pair[:3], pair[3:]
     return f"{_CURRENCY_REMAP.get(base, base)}{_CURRENCY_REMAP.get(quote, quote)}"
+
+
+def nautilus_to_bitfinex_pair(symbol: str) -> str:
+    """Convert a Nautilus symbol string back to the Bitfinex native pair.
+
+    Reverses the currency remapping so that e.g. ``BTCUSDT`` → ``BTCUST``
+    and ``BTC:USDC`` → ``BTC:UDC``.
+    """
+    if ":" in symbol:
+        base, quote = symbol.split(":", 1)
+        return f"{_CURRENCY_REMAP_INV.get(base, base)}:{_CURRENCY_REMAP_INV.get(quote, quote)}"
+    base, quote = symbol[:3], symbol[3:]
+    return f"{_CURRENCY_REMAP_INV.get(base, base)}{_CURRENCY_REMAP_INV.get(quote, quote)}"
 
 
 class BitfinexInstrumentProvider(InstrumentProvider):
