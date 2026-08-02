@@ -23,6 +23,7 @@ from nautilus_trader.adapters.bitfinex.constants import BITFINEX_VENUE
 from nautilus_trader.adapters.bitfinex.constants import BITFINEX_WS_BASE_URL
 from nautilus_trader.adapters.bitfinex.http.client import BitfinexHttpClient
 from nautilus_trader.adapters.bitfinex.providers import BitfinexInstrumentProvider
+from nautilus_trader.adapters.bitfinex.providers import bitfinex_pair_to_nautilus
 from nautilus_trader.adapters.bitfinex.websocket.client import BitfinexWebSocketClient
 from nautilus_trader.adapters.bitfinex.websocket.schemas import BitfinexEventMessage
 from nautilus_trader.cache.cache import Cache
@@ -194,11 +195,13 @@ class BitfinexDataClient(LiveMarketDataClient):
         if not isinstance(payload, list) or len(payload) < 4:
             return
 
-        pair = self._channel_map.get(chan_id)
-        if pair is None:
+        raw_pair = self._channel_map.get(chan_id)
+        if raw_pair is None:
             return
 
-        instrument_id = InstrumentId.from_str(f"{pair}.BITFINEX")
+        # Map Bitfinex native codes (UST→USDT, UDC→USDC) to Nautilus symbol
+        nautilus_symbol = bitfinex_pair_to_nautilus(raw_pair)
+        instrument_id = InstrumentId.from_str(f"{nautilus_symbol}.BITFINEX")
         instrument = self._cache.instrument(instrument_id)
         if instrument is None:
             self._log.debug(f"No instrument found for {instrument_id}, dropping tick")

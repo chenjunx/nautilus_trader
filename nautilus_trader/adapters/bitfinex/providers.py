@@ -28,6 +28,28 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
 
+# Bitfinex uses non-standard ticker codes for stablecoins; map to canonical names
+# so that cross-venue comparisons (e.g. spread monitor) work correctly.
+_CURRENCY_REMAP: dict[str, str] = {
+    "UST": "USDT",   # Tether
+    "UDC": "USDC",   # USD Coin
+    "EUT": "EURT",   # Tether EUR
+}
+
+
+def bitfinex_pair_to_nautilus(pair: str) -> str:
+    """Convert a raw Bitfinex pair string to the Nautilus symbol string.
+
+    Applies currency remapping so that e.g. ``BTCUST`` → ``BTCUSDT``
+    and ``BTC:UDC`` → ``BTC:USDC``.
+    """
+    if ":" in pair:
+        base, quote = pair.split(":", 1)
+        return f"{_CURRENCY_REMAP.get(base, base)}:{_CURRENCY_REMAP.get(quote, quote)}"
+    base, quote = pair[:3], pair[3:]
+    return f"{_CURRENCY_REMAP.get(base, base)}{_CURRENCY_REMAP.get(quote, quote)}"
+
+
 class BitfinexInstrumentProvider(InstrumentProvider):
     """
     Provides Bitfinex spot instruments via the public REST API.
@@ -99,8 +121,11 @@ class BitfinexInstrumentProvider(InstrumentProvider):
         """
         base_code, quote_code = self._parse_symbol(pair)
 
-        # Nautilus symbol uses the raw pair string (no colon variant normalisation)
-        raw_symbol = Symbol(pair)
+        # Apply currency remapping and use the normalised string as Nautilus symbol
+        base_code = _CURRENCY_REMAP.get(base_code, base_code)
+        quote_code = _CURRENCY_REMAP.get(quote_code, quote_code)
+        nautilus_pair = bitfinex_pair_to_nautilus(pair)
+        raw_symbol = Symbol(nautilus_pair)
         instrument_id = InstrumentId(symbol=raw_symbol, venue=BITFINEX_VENUE)
 
         # Bitfinex supports up to 8 decimal places; use unified defaults
