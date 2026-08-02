@@ -31,6 +31,9 @@ from nautilus_trader.adapters.binance import BinanceDataClientConfig
 from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+from nautilus_trader.adapters.bitfinex import BITFINEX
+from nautilus_trader.adapters.bitfinex import BitfinexDataClientConfig
+from nautilus_trader.adapters.bitfinex import BitfinexLiveDataClientFactory
 from nautilus_trader.adapters.gateio import GATEIO
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
@@ -58,7 +61,7 @@ MAIN_SPOT_VENUES = {str(BINANCE)}
 MAIN_PERP_VENUES = {BINANCE_FUT_KEY}
 
 # 副所（仅现货）
-SECONDARY_VENUES = {str(KRAKEN), str(GATEIO)}
+SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(BITFINEX)}
 
 # 白名单模式：在原规则基础上，进一步要求五个现货所都有该币
 ALL_SPOT_VENUES = MAIN_SPOT_VENUES | SECONDARY_VENUES
@@ -70,8 +73,9 @@ BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 # 各所折扣后 taker 费率默认值
 DEFAULT_FEES: dict[str, float] = {
     str(BINANCE): 0.00075,   # BNB 折扣后
-    str(KRAKEN):  0.00050,   # 30天量 >$50k
-    str(GATEIO):  0.00080,
+    str(KRAKEN):   0.00050,   # 30天量 >$50k
+    str(GATEIO):   0.00080,
+    str(BITFINEX): 0.00200,   # 标准 taker 0.2%
 }
 
 
@@ -526,6 +530,9 @@ def main() -> None:
             GATEIO: GateIoDataClientConfig(
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
+            BITFINEX: BitfinexDataClientConfig(
+                instrument_provider=InstrumentProviderConfig(load_all=True),
+            ),
         },
         strategies=[],
     )
@@ -547,6 +554,7 @@ def main() -> None:
     node.add_data_client_factory(BINANCE_FUT_KEY, BinanceLiveDataClientFactory)
     node.add_data_client_factory(KRAKEN, KrakenLiveDataClientFactory)
     node.add_data_client_factory(GATEIO, GateIoLiveDataClientFactory)
+    node.add_data_client_factory(BITFINEX, BitfinexLiveDataClientFactory)
     node.build()
     node.trader.add_strategy(monitor)
     node.run()
