@@ -24,6 +24,7 @@ import json
 import sys
 import time
 from collections import defaultdict
+from collections import deque
 
 from nautilus_trader.adapters.binance import BINANCE
 from nautilus_trader.adapters.binance import BinanceDataClientConfig
@@ -120,6 +121,13 @@ class SpreadMonitorConfig(StrategyConfig, frozen=True):
     slippage: float = 0.0002
     alert_only: bool = False
     venue_fees_json: str = "{}"
+    # 链路健康度检测
+    health_window_secs: float = 30.0
+    health_warmup_secs: float = 60.0
+    health_degrade_ratio: float = 0.2
+    health_recover_ratio: float = 0.5
+    health_baseline_ewma_secs: float = 300.0
+    health_check_interval: float = 5.0
 
 
 class SpreadMonitor(Strategy):
@@ -143,6 +151,21 @@ class SpreadMonitor(Strategy):
         self._slippage = config.slippage
         self._alert_only = config.alert_only
         self._venue_defaults: dict[str, float] = json.loads(config.venue_fees_json)
+
+        # 链路健康度检测（venue 级别，基于消息速率）
+        self._health_window_secs = config.health_window_secs
+        self._health_warmup_secs = config.health_warmup_secs
+        self._health_degrade_ratio = config.health_degrade_ratio
+        self._health_recover_ratio = config.health_recover_ratio
+        self._health_baseline_ewma_secs = config.health_baseline_ewma_secs
+        self._health_check_interval = config.health_check_interval
+        self._venue_tick_times: dict[str, deque] = defaultdict(deque)
+        self._venue_baseline_rate: dict[str, float] = {}
+        self._unhealthy_venues: set[str] = set()
+        self._unhealthy_since: dict[str, float] = {}
+        self._all_venues: set[str] = set()
+        self._start_time: float = 0.0
+        self._last_health_check: float = 0.0
 
     def on_start(self) -> None:
         instruments = self.cache.instruments()
@@ -236,6 +259,11 @@ class SpreadMonitor(Strategy):
 
             self._base_venues[base] = venues_for_base
 
+        self._all_venues = {
+            v for info in self._base_venues.values() for v in info["main"] | info["secondary"]
+        }
+        self._start_time = time.monotonic()
+
         self.log.info(f"已订阅 {len(self._inst_to_base)} 个行情流")
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -245,17 +273,29 @@ class SpreadMonitor(Strategy):
             return
 
         venue = str(tick.instrument_id.venue)
+        now = time.monotonic()
         self._prices[base][venue] = (float(tick.bid_price), float(tick.ask_price))
 
-        # 需要至少一个主所和一个副所都有数据
-        venue_data = self._prices[base]
+        dq = self._venue_tick_times[venue]
+        dq.append(now)
+        cutoff = now - self._health_window_secs
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+
+        if now - self._last_health_check >= self._health_check_interval:
+            self._last_health_check = now
+            self._check_health(now)
+
+        # 需要至少一个主所和一个副所都有健康数据
+        venue_data = {
+            v: p for v, p in self._prices[base].items() if v not in self._unhealthy_venues
+        }
         base_info = self._base_venues.get(base, {})
         has_main = any(v in venue_data for v in base_info.get("main", set()))
         has_secondary = any(v in venue_data for v in base_info.get("secondary", set()))
         if not (has_main and has_secondary):
             return
 
-        now = time.monotonic()
         if not self._alert_only and now - self._last_summary >= self._summary_interval:
             self._last_summary = now
             self._print_summary()
@@ -275,6 +315,54 @@ class SpreadMonitor(Strategy):
         self._last_print[base] = now
         self._print_opportunity(base, venue_data, gross_pct, net_pct,
                                 buy_v, buy_ask, fee_b, sell_v, sell_bid, fee_s)
+
+    def _check_health(self, now: float) -> None:
+        """
+        按 venue 聚合的消息速率检测链路健康度。速率显著低于基线（含完全断流）判不健康，
+        期间自动从价差计算中剔除该 venue 的数据；速率恢复后自动重新纳入。
+        """
+        if now - self._start_time < self._health_warmup_secs:
+            return
+
+        eps = 1e-9
+        alpha = min(1.0, self._health_check_interval / self._health_baseline_ewma_secs)
+
+        for venue in self._all_venues:
+            recent_rate = len(self._venue_tick_times.get(venue, ())) / self._health_window_secs
+            baseline = self._venue_baseline_rate.get(venue)
+            is_unhealthy = venue in self._unhealthy_venues
+
+            if baseline is None:
+                if recent_rate <= eps:
+                    # 预热期结束仍从未收到过任何 tick，视为不健康（无法确立正常基线）
+                    self._unhealthy_venues.add(venue)
+                    self._unhealthy_since[venue] = now
+                    self.log.warning(f"[health] {venue} 预热期内未收到任何行情，判定不健康")
+                else:
+                    self._venue_baseline_rate[venue] = recent_rate
+                continue
+
+            if not is_unhealthy:
+                if recent_rate < baseline * self._health_degrade_ratio:
+                    self._unhealthy_venues.add(venue)
+                    self._unhealthy_since[venue] = now
+                    self.log.warning(
+                        f"[health] {venue} 速率异常: 近期 {recent_rate:.2f}/s "
+                        f"<< 基线 {baseline:.2f}/s，已剔除该所数据",
+                    )
+                else:
+                    self._venue_baseline_rate[venue] = (
+                        (1 - alpha) * baseline + alpha * recent_rate
+                    )
+            else:
+                if recent_rate > baseline * self._health_recover_ratio:
+                    self._unhealthy_venues.discard(venue)
+                    since = self._unhealthy_since.pop(venue, now)
+                    self.log.warning(
+                        f"[health] {venue} 恢复正常: 近期 {recent_rate:.2f}/s "
+                        f"(基线 {baseline:.2f}/s)，持续不健康 {now - since:.0f}s 后重新纳入计算",
+                    )
+                # 不健康期间基线冻结，避免被低速率污染
 
     def _fee_for_inst(self, inst_id_str: str, venue: str) -> float:
         return self._inst_fee.get(inst_id_str, self._venue_defaults.get(venue, 0.001))
@@ -364,7 +452,10 @@ class SpreadMonitor(Strategy):
 
     def _print_summary(self) -> None:
         rows = []
-        for base, venue_data in self._prices.items():
+        for base, raw_venue_data in self._prices.items():
+            venue_data = {
+                v: p for v, p in raw_venue_data.items() if v not in self._unhealthy_venues
+            }
             base_info = self._base_venues.get(base, {})
             result = self._best_arb(base, venue_data, base_info)
             if result is None:
@@ -372,20 +463,39 @@ class SpreadMonitor(Strategy):
             gross_pct, net_pct, buy_v, _, fee_b, sell_v, _, fee_s = result
             rows.append((net_pct, gross_pct, base, venue_data, buy_v, sell_v, fee_b, fee_s))
 
-        if not rows:
-            return
+        if rows:
+            rows.sort(reverse=True)
+            ts = time.strftime("%H:%M:%S")
+            slip_pct = self._slippage * 2 * 100
+            print(f"\n{ts} ══ TOP 20 净价差排名（主所↔副所，手续费+滑点{slip_pct:.3f}%后）══")
+            fmt = "  {:<6}  {:<14}  gross={:+.5f}%  fees={:.3f}%  slip={:.3f}%  net={:+.5f}%  ({} → {})"
+            for net_pct, gross_pct, base, venue_data, buy_v, sell_v, fee_b, fee_s in rows[:20]:
+                tag = "ARBI" if net_pct > 0 else "norm"
+                fee_pct = (fee_b + fee_s) * 100
+                print(fmt.format(tag, base + "/USDT", gross_pct, fee_pct, slip_pct, net_pct, buy_v, sell_v))
+            print()
 
-        rows.sort(reverse=True)
-        ts = time.strftime("%H:%M:%S")
-        slip_pct = self._slippage * 2 * 100
-        print(f"\n{ts} ══ TOP 20 净价差排名（主所↔副所，手续费+滑点{slip_pct:.3f}%后）══")
-        fmt = "  {:<6}  {:<14}  gross={:+.5f}%  fees={:.3f}%  slip={:.3f}%  net={:+.5f}%  ({} → {})"
-        for net_pct, gross_pct, base, venue_data, buy_v, sell_v, fee_b, fee_s in rows[:20]:
-            tag = "ARBI" if net_pct > 0 else "norm"
-            fee_pct = (fee_b + fee_s) * 100
-            print(fmt.format(tag, base + "/USDT", gross_pct, fee_pct, slip_pct, net_pct, buy_v, sell_v))
-        print()
+        self._print_health()
         sys.stdout.flush()
+
+    def _print_health(self) -> None:
+        if not self._all_venues:
+            return
+        now = time.monotonic()
+        print("── 链路健康 ──")
+        for venue in sorted(self._all_venues):
+            recent_rate = len(self._venue_tick_times.get(venue, ())) / self._health_window_secs
+            baseline = self._venue_baseline_rate.get(venue)
+            baseline_str = f"{baseline:.2f}/s" if baseline is not None else "建立中"
+            if venue in self._unhealthy_venues:
+                since = self._unhealthy_since.get(venue, now)
+                print(
+                    f"  {venue:<10} ✗ {recent_rate:.2f}/s  (基线 {baseline_str}, "
+                    f"已持续 {now - since:.0f}s) — 已剔除",
+                )
+            else:
+                print(f"  {venue:<10} ✓ {recent_rate:.2f}/s  (基线 {baseline_str})")
+        print()
 
 
 def main() -> None:
