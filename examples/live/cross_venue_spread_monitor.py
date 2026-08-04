@@ -215,18 +215,24 @@ def _fetch_kraken_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
     return dict(result)
 
 
-def _fetch_gateio_chains() -> dict[str, set[str]]:
-    """拉取 Gate.io 每个币种支持的提现网络。GET /api/v4/wallet/currency_chains（公开接口）。"""
-    resp = httpx.get("https://api.gateio.ws/api/v4/wallet/currency_chains", timeout=10.0)
+def _fetch_gateio_chains(currency: str) -> set[str]:
+    """拉取 Gate.io 单个币种支持的提现网络。GET /api/v4/wallet/currency_chains?currency=xxx（公开接口）。
+
+    该接口不支持一次性拉取全部币种，必须按币种查询，因此调用方需自行传入候选币种列表。
+    """
+    resp = httpx.get(
+        "https://api.gateio.ws/api/v4/wallet/currency_chains",
+        params={"currency": currency},
+        timeout=10.0,
+    )
     resp.raise_for_status()
 
-    result: dict[str, set[str]] = defaultdict(set)
+    result: set[str] = set()
     for row in resp.json():
-        base = str(row.get("currency", "")).upper()
         norm = _normalize_chain(str(row.get("chain", "")))
-        if base and norm:
-            result[base].add(norm)
-    return dict(result)
+        if norm:
+            result.add(norm)
+    return result
 
 
 def _dump_chains(symbols_csv: str) -> None:
@@ -238,7 +244,7 @@ def _dump_chains(symbols_csv: str) -> None:
     kraken_key = os.environ.get("KRAKEN_SPOT_API_KEY")
     kraken_secret = os.environ.get("KRAKEN_SPOT_API_SECRET")
 
-    fetchers: dict[str, object] = {GATEIO: _fetch_gateio_chains}  # 公开接口，始终拉取
+    fetchers: dict[str, object] = {}
 
     if binance_key and binance_secret:
         fetchers[BINANCE] = lambda: _fetch_binance_chains(binance_key, binance_secret)
@@ -249,6 +255,12 @@ def _dump_chains(symbols_csv: str) -> None:
         fetchers[KRAKEN] = lambda: _fetch_kraken_chains(kraken_key, kraken_secret)
     else:
         print(f"[dump] 跳过 {KRAKEN}：缺少 KRAKEN_SPOT_API_KEY/KRAKEN_SPOT_API_SECRET")
+
+    # Gate.io 接口按币种查询，没有一次拉全部的接口，必须配合 --dump-symbols 指定币种
+    if symbols:
+        fetchers[GATEIO] = lambda: {sym: _fetch_gateio_chains(sym) for sym in sorted(symbols)}
+    else:
+        print(f"[dump] 跳过 {GATEIO}：该所接口按币种查询，需配合 --dump-symbols 指定币种")
 
     for venue, fetch in fetchers.items():
         print(f"\n{'='*60}\n[{venue}] 提现链数据\n{'='*60}")
@@ -269,7 +281,11 @@ def _dump_chains(symbols_csv: str) -> None:
 
 
 def _load_chain_support(relevant_venues: set[str]) -> dict[str, dict[str, set[str]]]:
-    """按需拉取各所的提现链数据。缺少对应所的 API Key 时直接报错退出。"""
+    """按需拉取各所的提现链数据。缺少对应所的 API Key 时直接报错退出。
+
+    Gate.io 接口按币种查询、没有一次拉全部的接口，因此不在此处预取，
+    改为在 `_filter_by_common_chain` 中按实际候选币种懒加载。
+    """
     chains: dict[str, dict[str, set[str]]] = {}
 
     if BINANCE in relevant_venues:
@@ -293,10 +309,6 @@ def _load_chain_support(relevant_venues: set[str]) -> dict[str, dict[str, set[st
             )
         chains[KRAKEN] = _fetch_kraken_chains(key, secret)
         print(f"[chain] {KRAKEN}: {len(chains[KRAKEN])} 个币种的提现链数据")
-
-    if GATEIO in relevant_venues:
-        chains[GATEIO] = _fetch_gateio_chains()
-        print(f"[chain] {GATEIO}: {len(chains[GATEIO])} 个币种的提现链数据")
 
     return chains
 
@@ -377,6 +389,7 @@ class SpreadMonitor(Strategy):
             venue: {base: set(chains) for base, chains in per_base.items()}
             for venue, per_base in raw_chain_support.items()
         }
+        self._gateio_chain_cache: dict[str, set[str]] = {}
 
         # 链路健康度检测（venue 级别，基于消息速率）
         self._health_window_secs = config.health_window_secs
@@ -489,6 +502,18 @@ class SpreadMonitor(Strategy):
 
         return qualifying, main_venues, secondary_venues
 
+    def _get_chain_support(self, venue: str, base: str) -> set[str]:
+        """返回某所某币种的提现链集合。Gate.io 接口按币种查询，此处懒加载并缓存结果。"""
+        if venue == GATEIO:
+            if base not in self._gateio_chain_cache:
+                try:
+                    self._gateio_chain_cache[base] = _fetch_gateio_chains(base)
+                except Exception as exc:  # noqa: BLE001 - 单个币种拉取失败不应中断整体流程
+                    self.log.warning(f"[chain] 拉取 {GATEIO} {base} 提现链失败: {exc!r}")
+                    self._gateio_chain_cache[base] = set()
+            return self._gateio_chain_cache[base]
+        return self._chain_support.get(venue, {}).get(base, set())
+
     def _filter_by_common_chain(self, qualifying: dict[str, dict]) -> dict[str, dict]:
         """剔除主所与副所没有共同提现链的币种（主所整体 ∩ 副所整体，链集合取并集后比较）。"""
         if not self._require_common_chain:
@@ -498,11 +523,11 @@ class SpreadMonitor(Strategy):
         for base, info in qualifying.items():
             main_chains: set[str] = set()
             for venue in info["main_spot"]:
-                main_chains |= self._chain_support.get(venue, {}).get(base, set())
+                main_chains |= self._get_chain_support(venue, base)
 
             sec_chains: set[str] = set()
             for venue in info["secondary_spot"]:
-                sec_chains |= self._chain_support.get(venue, {}).get(base, set())
+                sec_chains |= self._get_chain_support(venue, base)
 
             common = main_chains & sec_chains
             if not common:
