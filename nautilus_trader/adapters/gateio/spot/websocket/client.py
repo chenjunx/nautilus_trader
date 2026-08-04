@@ -27,9 +27,9 @@ from nautilus_trader.core.nautilus_pyo3 import WebSocketClientError
 from nautilus_trader.core.nautilus_pyo3 import WebSocketConfig
 
 
-class GateIoWebSocketClient:
+class GateIoSpotWebSocketClient:
     """
-    Provides a Gate.io streaming WebSocket client.
+    Provides a Gate.io spot streaming WebSocket client.
 
     Parameters
     ----------

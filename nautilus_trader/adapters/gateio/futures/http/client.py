@@ -16,16 +16,17 @@
 import msgspec
 
 import nautilus_trader
-from nautilus_trader.adapters.gateio.http.models import GateIoCurrencyPair
+from nautilus_trader.adapters.gateio.common.constants import GATEIO_FUTURES_HTTP_BASE_URL
+from nautilus_trader.adapters.gateio.futures.http.models import GateIoFuturesContract
 from nautilus_trader.common.component import Logger
 from nautilus_trader.core.nautilus_pyo3 import HttpClient
 from nautilus_trader.core.nautilus_pyo3 import HttpMethod
 from nautilus_trader.core.nautilus_pyo3 import HttpResponse
 
 
-class GateIoHttpClient:
+class GateIoFuturesHttpClient:
     """
-    Provides a Gate.io asynchronous HTTP client for public market data.
+    Provides a Gate.io asynchronous HTTP client for public futures market data.
 
     Parameters
     ----------
@@ -34,7 +35,7 @@ class GateIoHttpClient:
 
     """
 
-    BASE_URL = "https://api.gateio.ws/api/v4"
+    BASE_URL = GATEIO_FUTURES_HTTP_BASE_URL
 
     def __init__(self, base_url: str | None = None) -> None:
         self._log: Logger = Logger(type(self).__name__)
@@ -44,7 +45,7 @@ class GateIoHttpClient:
             "User-Agent": nautilus_trader.NAUTILUS_USER_AGENT,
         }
         self._client = HttpClient()
-        self._decoder_pairs = msgspec.json.Decoder(list[GateIoCurrencyPair])
+        self._decoder_contracts = msgspec.json.Decoder(list[GateIoFuturesContract])
 
     async def _get(self, path: str) -> bytes:
         response: HttpResponse = await self._client.request(
@@ -60,7 +61,7 @@ class GateIoHttpClient:
             )
         return response.body
 
-    async def request_spot_currency_pairs(self) -> list[GateIoCurrencyPair]:
-        """Fetch all spot currency pairs from Gate.io."""
-        raw = await self._get("/spot/currency_pairs")
-        return self._decoder_pairs.decode(raw)
+    async def request_futures_contracts(self, settle: str = "usdt") -> list[GateIoFuturesContract]:
+        """Fetch all futures contracts for the given settlement asset from Gate.io."""
+        raw = await self._get(f"/futures/{settle}/contracts")
+        return self._decoder_contracts.decode(raw)

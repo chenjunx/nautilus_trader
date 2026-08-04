@@ -17,14 +17,15 @@ import asyncio
 
 import msgspec
 
+from nautilus_trader.adapters.gateio.common.constants import GATEIO_CLIENT_ID
+from nautilus_trader.adapters.gateio.common.constants import GATEIO_FUTURES_WS_BASE_URL_TEMPLATE
+from nautilus_trader.adapters.gateio.common.constants import GATEIO_VENUE
 from nautilus_trader.adapters.gateio.config import GateIoDataClientConfig
-from nautilus_trader.adapters.gateio.constants import GATEIO_CLIENT_ID
-from nautilus_trader.adapters.gateio.constants import GATEIO_VENUE
-from nautilus_trader.adapters.gateio.http.client import GateIoHttpClient
-from nautilus_trader.adapters.gateio.providers import GateIoInstrumentProvider
-from nautilus_trader.adapters.gateio.websocket.client import GateIoWebSocketClient
-from nautilus_trader.adapters.gateio.websocket.schemas import GateIoBookTickerResult
-from nautilus_trader.adapters.gateio.websocket.schemas import GateIoWsMessage
+from nautilus_trader.adapters.gateio.futures.http.client import GateIoFuturesHttpClient
+from nautilus_trader.adapters.gateio.futures.providers import GateIoFuturesInstrumentProvider
+from nautilus_trader.adapters.gateio.futures.websocket.client import GateIoFuturesWebSocketClient
+from nautilus_trader.adapters.gateio.futures.websocket.schemas import GateIoFuturesBookTickerResult
+from nautilus_trader.adapters.gateio.futures.websocket.schemas import GateIoFuturesWsMessage
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
@@ -38,9 +39,9 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
 
-class GateIoDataClient(LiveMarketDataClient):
+class GateIoFuturesDataClient(LiveMarketDataClient):
     """
-    Provides a data client for the Gate.io spot exchange.
+    Provides a data client for Gate.io USDT-margined perpetual futures.
 
     Parameters
     ----------
@@ -65,10 +66,12 @@ class GateIoDataClient(LiveMarketDataClient):
         clock: LiveClock,
         config: GateIoDataClientConfig,
     ) -> None:
-        self._http_client = GateIoHttpClient(base_url=config.base_url_http)
-        instrument_provider = GateIoInstrumentProvider(
+        self._settle = config.settle
+        self._http_client = GateIoFuturesHttpClient(base_url=config.base_url_http)
+        instrument_provider = GateIoFuturesInstrumentProvider(
             http_client=self._http_client,
             clock=clock,
+            settle=self._settle,
             config=config.instrument_provider,
         )
 
@@ -82,15 +85,17 @@ class GateIoDataClient(LiveMarketDataClient):
             instrument_provider=instrument_provider,
         )
 
-        ws_url = config.base_url_ws or "wss://api.gateio.ws/ws/v4/"
-        self._ws_client = GateIoWebSocketClient(
+        ws_url = config.base_url_ws or GATEIO_FUTURES_WS_BASE_URL_TEMPLATE.format(
+            settle=self._settle,
+        )
+        self._ws_client = GateIoFuturesWebSocketClient(
             loop=loop,
             url=ws_url,
             handler=self._handle_ws_message,
             handler_reconnect=self._resubscribe,
         )
 
-        self._decoder = msgspec.json.Decoder(GateIoWsMessage)
+        self._decoder = msgspec.json.Decoder(GateIoFuturesWsMessage)
         self._subscribed_symbols: set[str] = set()
 
     def _send_all_instruments_to_data_engine(self) -> None:
@@ -100,7 +105,7 @@ class GateIoDataClient(LiveMarketDataClient):
             self._cache.add_currency(currency)
 
     async def _connect(self) -> None:
-        self._log.info("Initializing Gate.io instruments...")
+        self._log.info("Initializing Gate.io futures instruments...")
         await self._instrument_provider.initialize()
         self._send_all_instruments_to_data_engine()
         await self._ws_client.connect()
@@ -135,14 +140,14 @@ class GateIoDataClient(LiveMarketDataClient):
             self._log.error(f"Gate.io WS error: {msg.error}")
             return
 
-        if msg.event != "update" or msg.channel != "spot.book_ticker":
+        if msg.event != "update" or msg.channel != "futures.book_ticker":
             return
 
         if msg.result is None:
             return
 
         try:
-            result = msgspec.convert(msg.result, GateIoBookTickerResult)
+            result = msgspec.convert(msg.result, GateIoFuturesBookTickerResult)
         except Exception as e:
             self._log.warning(f"Failed to convert ticker result: {e!r}")
             return
@@ -158,8 +163,8 @@ class GateIoDataClient(LiveMarketDataClient):
                 instrument_id=instrument_id,
                 bid_price=Price(float(result.b), precision=instrument.price_precision),
                 ask_price=Price(float(result.a), precision=instrument.price_precision),
-                bid_size=Quantity(float(result.B), precision=instrument.size_precision),
-                ask_size=Quantity(float(result.A), precision=instrument.size_precision),
+                bid_size=Quantity(result.B, precision=instrument.size_precision),
+                ask_size=Quantity(result.A, precision=instrument.size_precision),
                 ts_event=millis_to_nanos(result.t),
                 ts_init=self._clock.timestamp_ns(),
             )

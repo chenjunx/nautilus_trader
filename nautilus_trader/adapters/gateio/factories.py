@@ -15,8 +15,10 @@
 
 import asyncio
 
+from nautilus_trader.adapters.gateio.common.enums import GateIoAccountType
 from nautilus_trader.adapters.gateio.config import GateIoDataClientConfig
-from nautilus_trader.adapters.gateio.data import GateIoDataClient
+from nautilus_trader.adapters.gateio.futures.data import GateIoFuturesDataClient
+from nautilus_trader.adapters.gateio.spot.data import GateIoSpotDataClient
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
@@ -34,8 +36,16 @@ class GateIoLiveDataClientFactory(LiveDataClientFactory):
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
-    ) -> GateIoDataClient:
-        return GateIoDataClient(
+    ) -> GateIoSpotDataClient | GateIoFuturesDataClient:
+        if config.account_type == GateIoAccountType.LINEAR:
+            return GateIoFuturesDataClient(
+                loop=loop,
+                msgbus=msgbus,
+                cache=cache,
+                clock=clock,
+                config=config,
+            )
+        return GateIoSpotDataClient(
             loop=loop,
             msgbus=msgbus,
             cache=cache,

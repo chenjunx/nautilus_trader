@@ -13,6 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from nautilus_trader.adapters.gateio.common.enums import GateIoAccountType
 from nautilus_trader.config import LiveDataClientConfig
 
 
@@ -22,6 +23,11 @@ class GateIoDataClientConfig(LiveDataClientConfig, frozen=True):
 
     Parameters
     ----------
+    account_type : GateIoAccountType, default GateIoAccountType.SPOT
+        The account/product type for the client (spot or USDT-margined linear futures).
+    settle : str, default 'usdt'
+        The settlement asset for futures contracts. Only consulted when
+        `account_type` is `GateIoAccountType.LINEAR`.
     base_url_http : str, optional
         Override the default HTTP base URL.
     base_url_ws : str, optional
@@ -29,5 +35,7 @@ class GateIoDataClientConfig(LiveDataClientConfig, frozen=True):
 
     """
 
+    account_type: GateIoAccountType = GateIoAccountType.SPOT
+    settle: str = "usdt"
     base_url_http: str | None = None
     base_url_ws: str | None = None

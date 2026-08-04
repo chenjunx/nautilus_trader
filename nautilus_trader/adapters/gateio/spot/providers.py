@@ -17,9 +17,9 @@ from decimal import Decimal
 
 import msgspec
 
-from nautilus_trader.adapters.gateio.constants import GATEIO_VENUE
-from nautilus_trader.adapters.gateio.http.client import GateIoHttpClient
-from nautilus_trader.adapters.gateio.http.models import GateIoCurrencyPair
+from nautilus_trader.adapters.gateio.common.constants import GATEIO_VENUE
+from nautilus_trader.adapters.gateio.spot.http.client import GateIoSpotHttpClient
+from nautilus_trader.adapters.gateio.spot.http.models import GateIoCurrencyPair
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.providers import InstrumentProvider
 from nautilus_trader.config import InstrumentProviderConfig
@@ -31,13 +31,13 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
 
-class GateIoInstrumentProvider(InstrumentProvider):
+class GateIoSpotInstrumentProvider(InstrumentProvider):
     """
     Provides Gate.io spot instruments via the public REST API.
 
     Parameters
     ----------
-    http_client : GateIoHttpClient
+    http_client : GateIoSpotHttpClient
         The HTTP client for the provider.
     clock : LiveClock
         The clock for the provider.
@@ -48,7 +48,7 @@ class GateIoInstrumentProvider(InstrumentProvider):
 
     def __init__(
         self,
-        http_client: GateIoHttpClient,
+        http_client: GateIoSpotHttpClient,
         clock: LiveClock,
         config: InstrumentProviderConfig | None = None,
     ) -> None:

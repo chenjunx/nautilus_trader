@@ -21,5 +21,11 @@ GATEIO = "GATEIO"
 GATEIO_VENUE = Venue("GATEIO")
 GATEIO_CLIENT_ID = ClientId("GATEIO")
 
-GATEIO_HTTP_BASE_URL = "https://api.gateio.ws/api/v4"
-GATEIO_WS_BASE_URL = "wss://api.gateio.ws/ws/v4/"
+GATEIO_SPOT_HTTP_BASE_URL = "https://api.gateio.ws/api/v4"
+GATEIO_SPOT_WS_BASE_URL = "wss://api.gateio.ws/ws/v4/"
+
+# Futures REST shares the spot host, paths are namespaced per settlement asset:
+# GET /futures/{settle}/contracts, e.g. /futures/usdt/contracts.
+GATEIO_FUTURES_HTTP_BASE_URL = "https://api.gateio.ws/api/v4"
+# Futures WebSocket lives on a dedicated host, namespaced per settlement asset.
+GATEIO_FUTURES_WS_BASE_URL_TEMPLATE = "wss://fx-ws.gateio.ws/v4/ws/{settle}"
