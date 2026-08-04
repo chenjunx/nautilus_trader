@@ -57,7 +57,6 @@ from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.adapters.gateio import GATEIO
-from nautilus_trader.adapters.gateio import GateIoAccountType
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KRAKEN
@@ -78,14 +77,14 @@ from nautilus_trader.trading.strategy import Strategy
 
 # Binance futures 使用独立 venue key，便于与现货区分
 BINANCE_FUT_KEY = "BINANCE_FUT"
-# Gate.io 现货/永续实际都打的是同一个 venue（GATEIO），这里只是为了 data_clients 字典 key 不冲突
-GATEIO_FUT_KEY = "GATEIO_FUT"
 
 # 交易所配置总表：新增/删除一个所，只需在此增删一条记录。
 # roles: "main_spot" | "main_perp" | "secondary" | "secondary_perp"
 # instrument_venue: 该 client 加载出来的 instrument 实际挂的 venue（默认等于 key）。
-# Binance 永续通过 venue= 参数覆盖，key 与实际 venue 一致；Gate.io 现货/永续无此覆盖能力，
-# 实际 venue 恒为 GATEIO，因此永续条目需要显式声明 instrument_venue=GATEIO。
+# Binance 永续通过 venue= 参数覆盖，key 与实际 venue 一致。
+# 注：Gate.io 现货/永续 client 在适配器里 client_id 都硬编码为 GATEIO，无法在同一
+# TradingNode 里同时注册两个 Gate.io client（会因 client_id 冲突报错），因此 Gate.io
+# 暂不接入永续，副所永续只由 Kraken 提供。
 VENUE_REGISTRY: list[dict] = [
     {
         "key": BINANCE,
@@ -129,18 +128,6 @@ VENUE_REGISTRY: list[dict] = [
         ),
         "factory": GateIoLiveDataClientFactory,
         "default_fee": 0.00080,
-    },
-    {
-        "key": GATEIO_FUT_KEY,
-        "roles": {"secondary_perp"},
-        "instrument_venue": GATEIO,
-        "config": lambda: GateIoDataClientConfig(
-            account_type=GateIoAccountType.LINEAR,
-            settle="usdt",
-            instrument_provider=InstrumentProviderConfig(load_all=True),
-        ),
-        "factory": GateIoLiveDataClientFactory,
-        "default_fee": None,
     },
 ]
 
