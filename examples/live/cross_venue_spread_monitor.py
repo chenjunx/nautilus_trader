@@ -263,24 +263,47 @@ def _fetch_kraken_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
     return dict(result)
 
 
-def _fetch_gateio_chains(currency: str) -> set[str]:
+# Gate.io currency_chains 接口限速较严，按币种批量拉取时若无间隔很容易触发 429，
+# 因此这里做了简单的请求间隔限速（跨调用共享，见 _gateio_last_call_at）。
+_GATEIO_CHAIN_MIN_INTERVAL = 0.3  # 秒
+_gateio_last_call_at = 0.0
+
+
+def _fetch_gateio_chains(currency: str, max_retries: int = 3) -> set[str]:
     """拉取 Gate.io 单个币种支持的提现网络。GET /api/v4/wallet/currency_chains?currency=xxx（公开接口）。
 
     该接口不支持一次性拉取全部币种，必须按币种查询，因此调用方需自行传入候选币种列表。
+    对请求间隔做了限速，并在遇到 429 时做指数退避重试。
     """
-    resp = httpx.get(
-        "https://api.gateio.ws/api/v4/wallet/currency_chains",
-        params={"currency": currency},
-        timeout=10.0,
-    )
-    resp.raise_for_status()
+    global _gateio_last_call_at
 
-    result: set[str] = set()
-    for row in resp.json():
-        norm = _normalize_chain(str(row.get("chain", "")))
-        if norm:
-            result.add(norm)
-    return result
+    attempt = 0
+    while True:
+        wait = _GATEIO_CHAIN_MIN_INTERVAL - (time.monotonic() - _gateio_last_call_at)
+        if wait > 0:
+            time.sleep(wait)
+        _gateio_last_call_at = time.monotonic()
+
+        try:
+            resp = httpx.get(
+                "https://api.gateio.ws/api/v4/wallet/currency_chains",
+                params={"currency": currency},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and attempt < max_retries:
+                attempt += 1
+                time.sleep(2**attempt)  # 2s, 4s, 8s...
+                continue
+            raise
+
+        result: set[str] = set()
+        for row in resp.json():
+            norm = _normalize_chain(str(row.get("chain", "")))
+            if norm:
+                result.add(norm)
+        return result
 
 
 def _dump_chains(symbols_csv: str) -> None:
