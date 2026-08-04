@@ -38,14 +38,14 @@ Cross-venue USDT spot spread monitor - main vs secondary venues.
   Gate.io 的 adapter 完全没有私有接口支持，只能使用静态费率。
 
 费用模型（单边）:
-  买入成本 = ask × (1 + taker_fee + slippage)
-  卖出收益 = bid × (1 - taker_fee - slippage)
+  买入成本 = ask × (1 + taker_fee)
+  卖出收益 = bid × (1 - taker_fee)
   净价差   = 卖出收益 - 买入成本（主所↔主所、主所↔副所方向；副所↔副所不计算）
 
 Usage:
     python examples/live/cross_venue_spread_monitor.py
     python examples/live/cross_venue_spread_monitor.py --alert-only
-    python examples/live/cross_venue_spread_monitor.py --slippage 0.001 --fees KRAKEN=0.002
+    python examples/live/cross_venue_spread_monitor.py --fees KRAKEN=0.002
     python examples/live/cross_venue_spread_monitor.py --mode manual \
         --symbols BTC,ETH --main BINANCE --secondary KRAKEN,GATEIO
     BINANCE_API_KEY=... BINANCE_API_SECRET=... \
@@ -441,7 +441,6 @@ class SpreadMonitorConfig(StrategyConfig, frozen=True):
     min_net_spread_pct: float = 0.0
     throttle_secs: float = 2.0
     summary_interval: int = 30
-    slippage: float = 0.0002
     alert_only: bool = False
     venue_fees_json: str = "{}"
     # 匹配模式："auto"（自动发现，默认）或 "manual"（手动指定币种+主副所）
@@ -479,7 +478,6 @@ class SpreadMonitor(Strategy):
         self._min_net_pct = config.min_net_spread_pct
         self._throttle = config.throttle_secs
         self._summary_interval = config.summary_interval
-        self._slippage = config.slippage
         self._alert_only = config.alert_only
         self._venue_defaults: dict[str, float] = json.loads(config.venue_fees_json)
 
@@ -651,7 +649,7 @@ class SpreadMonitor(Strategy):
         self.log.info(f"[SpreadMonitor] 配对完成（模式={self._mode}），共 {len(qualifying)} 个 USDT 交易对")
         self.log.info(f"主所: {main_venues}  副所: {secondary_venues}")
         if not self._alert_only:
-            self.log.info(f"净价差阈值: {self._min_net_pct}%  滑点: {self._slippage*100:.4f}%")
+            self.log.info(f"净价差阈值: {self._min_net_pct}%")
         for base in sorted(qualifying):
             info = qualifying[base]
             all_insts: dict[str, object] = {**info["main_spot"], **info["secondary_spot"]}
@@ -848,13 +846,12 @@ class SpreadMonitor(Strategy):
         """
         主所↔主所、主所↔副所均可配对；副所↔副所不配对（两侧都不能开仓对冲，无可执行路径）。
         净价差 = 卖出收益 - 买入成本
-               = bid_sell × (1 - fee_s - slip) - ask_buy × (1 + fee_b + slip)
+               = bid_sell × (1 - fee_s) - ask_buy × (1 + fee_b)
         """
         mid = sum((b + a) / 2 for b, a in venue_data.values()) / len(venue_data)
         if mid == 0:
             return None
 
-        slip = self._slippage
         sec_venues = base_info.get("secondary", set()) & venue_data.keys()
         all_venues = list(venue_data.keys())
 
@@ -878,7 +875,7 @@ class SpreadMonitor(Strategy):
                               if self._inst_to_base.get(k) == base and sell_v in k),
                              self._venue_defaults.get(sell_v, 0.001))
 
-                net = bid * (1 - fee_s - slip) - ask * (1 + fee_b + slip)
+                net = bid * (1 - fee_s) - ask * (1 + fee_b)
                 if net > best_net:
                     best_net = net
                     gross_pct = (bid - ask) / mid * 100
@@ -907,13 +904,11 @@ class SpreadMonitor(Strategy):
         )
         ts = time.strftime("%H:%M:%S")
         fee_pct = (fee_b + fee_s) * 100
-        slip_pct = self._slippage * 2 * 100
         print(
             f"{ts} {tag} | {base+'/USDT':<14} | {prices}\n"
             f"         在 {buy_v} 买(ask={buy_ask:.6g}, 费={fee_b*100:.3f}%)  "
             f"在 {sell_v} 卖(bid={sell_bid:.6g}, 费={fee_s*100:.3f}%)\n"
-            f"         毛价差={gross_pct:+.4f}%  手续费={fee_pct:.3f}%  "
-            f"滑点={slip_pct:.3f}%  净价差={net_pct:+.4f}%"
+            f"         毛价差={gross_pct:+.4f}%  手续费={fee_pct:.3f}%  净价差={net_pct:+.4f}%"
         )
         sys.stdout.flush()
 
@@ -933,13 +928,12 @@ class SpreadMonitor(Strategy):
         if rows:
             rows.sort(reverse=True)
             ts = time.strftime("%H:%M:%S")
-            slip_pct = self._slippage * 2 * 100
-            print(f"\n{ts} ══ TOP 20 净价差排名（主所↔副所，手续费+滑点{slip_pct:.3f}%后）══")
-            fmt = "  {:<6}  {:<14}  gross={:+.5f}%  fees={:.3f}%  slip={:.3f}%  net={:+.5f}%  ({} → {})"
+            print(f"\n{ts} ══ TOP 20 净价差排名（主所↔副所，手续费后）══")
+            fmt = "  {:<6}  {:<14}  gross={:+.5f}%  fees={:.3f}%  net={:+.5f}%  ({} → {})"
             for net_pct, gross_pct, base, venue_data, buy_v, sell_v, fee_b, fee_s in rows[:20]:
                 tag = "ARBI" if net_pct > 0 else "norm"
                 fee_pct = (fee_b + fee_s) * 100
-                print(fmt.format(tag, base + "/USDT", gross_pct, fee_pct, slip_pct, net_pct, buy_v, sell_v))
+                print(fmt.format(tag, base + "/USDT", gross_pct, fee_pct, net_pct, buy_v, sell_v))
             print()
 
         self._print_health()
@@ -978,8 +972,6 @@ def main() -> None:
                         help="汇总排名打印间隔秒数（默认 30）")
     parser.add_argument("--fees", type=str, default="",
                         help="覆盖手续费，格式: BINANCE=0.00075,KRAKEN=0.0005（默认各所折扣后费率）")
-    parser.add_argument("--slippage", type=float, default=0.0002,
-                        help="单边滑点估算（默认 0.0002 = 0.02%%）")
     parser.add_argument("--alert-only", action="store_true",
                         help="只在 net>0 时输出，适合后台运行")
     parser.add_argument("--mode", choices=["auto", "manual"], default="auto",
@@ -1015,7 +1007,6 @@ def main() -> None:
     print("[fees] 使用手续费率:")
     for v, f in venue_fees.items():
         print(f"  {v}: {f*100:.4f}%")
-    print(f"[fees] 单边滑点: {args.slippage*100:.4f}%")
 
     chain_support_json = "{}"
     if args.require_common_chain:
@@ -1041,7 +1032,6 @@ def main() -> None:
             min_net_spread_pct=args.min_net,
             throttle_secs=args.throttle,
             summary_interval=args.summary,
-            slippage=args.slippage,
             alert_only=args.alert_only,
             venue_fees_json=json.dumps(venue_fees),
             mode=args.mode,
