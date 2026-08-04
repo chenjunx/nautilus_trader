@@ -224,9 +224,9 @@ class SpreadMonitor(Strategy):
                     f"    [{role}] {venue:<12} "
                     f"价格步长={inst.price_increment}  "
                     f"数量步长={inst.size_increment}  "
-                    f"最小名义={min_n if min_n is not None else 'N/A':>12}  "
-                    f"最大单量={max_q if max_q is not None else 'N/A':>14}  "
-                    f"最小单量={min_q if min_q is not None else 'N/A'}"
+                    f"最小名义={str(min_n) if min_n is not None else 'N/A':>12}  "
+                    f"最大单量={str(max_q) if max_q is not None else 'N/A':>14}  "
+                    f"最小单量={str(min_q) if min_q is not None else 'N/A'}"
                 )
         print(f"{'='*88}\n")
 
