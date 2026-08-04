@@ -180,7 +180,7 @@ VENUE_REGISTRY: list[dict] = [
             instrument_provider=InstrumentProviderConfig(load_all=True),
         ),
         "factory": OKXLiveDataClientFactory,
-        "default_fee": 0.00080,   # OKX 现货 taker，需按实际账户等级核实
+        "default_fee": 0.00064,   # OKX 现货 taker，8折折扣后（原始 0.00080）
     },
 ]
 
