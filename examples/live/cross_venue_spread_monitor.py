@@ -29,6 +29,14 @@ Cross-venue USDT spot spread monitor - main vs secondary venues.
     KRAKEN_SPOT_API_KEY / KRAKEN_SPOT_API_SECRET
   凭据缺失时直接报错退出；可用 --no-require-common-chain 关闭该规则（无需任何 Key）。
 
+真实费率（自动，无需开关）:
+  Binance/OKX 的 adapter 本身在配置了对应 API Key 时就会自动按账户实际费率（VIP 档位后）
+  加载 instrument.taker_fee，脚本直接读取，无需额外处理。
+  Kraken 的 adapter 不支持这一点，脚本在配置了 KRAKEN_SPOT_API_KEY/SECRET 时会在启动时
+  额外调用私有 TradeVolume 接口，按账户 30 天成交量对应档位拉取真实 taker 费率覆盖
+  DEFAULT_FEES/--fees 的静态值；未配置该 Key 或拉取失败时静默回退到静态值，不影响启动。
+  Gate.io 的 adapter 完全没有私有接口支持，只能使用静态费率。
+
 费用模型（单边）:
   买入成本 = ask × (1 + taker_fee + slippage)
   卖出收益 = bid × (1 - taker_fee - slippage)
@@ -137,7 +145,8 @@ VENUE_REGISTRY: list[dict] = [
             instrument_provider=InstrumentProviderConfig(load_all=True),
         ),
         "factory": KrakenLiveDataClientFactory,
-        "default_fee": 0.00050,   # 30天量 >$50k
+        "default_fee": 0.00050,   # 静态兜底值（30天量 >$50k 档位）；配置 KRAKEN_SPOT_API_KEY/SECRET
+                                   # 后启动时会用账户真实费率覆盖，见 on_start() 里的拉取逻辑
     },
     {
         "key": GATEIO,
@@ -233,11 +242,14 @@ def _fetch_binance_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
     return result
 
 
-def _fetch_kraken_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
-    """拉取 Kraken 每个币种支持的提现网络。POST /0/private/WithdrawMethods（签名接口）。"""
-    path = "/0/private/WithdrawMethods"
+def _kraken_private_post(path: str, extra_params: dict, api_key: str, api_secret: str) -> dict:
+    """向 Kraken 私有接口发起签名 POST 请求，返回 `result` 字段。
+
+    签名方案: HMAC-SHA512(path + SHA256(nonce + postdata), secret)，Kraken 私有接口通用。
+    """
     nonce = str(int(time.time() * 1000))
-    postdata = urllib.parse.urlencode({"nonce": nonce})
+    params = {"nonce": nonce, **extra_params}
+    postdata = urllib.parse.urlencode(params)
     sha = hashlib.sha256((nonce + postdata).encode()).digest()
     sig = base64.b64encode(
         hmac.new(base64.b64decode(api_secret), path.encode() + sha, hashlib.sha512).digest(),
@@ -245,22 +257,44 @@ def _fetch_kraken_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
     headers = {"API-Key": api_key, "API-Sign": sig}
     resp = httpx.post(
         f"https://api.kraken.com{path}",
-        data={"nonce": nonce},
+        data=params,
         headers=headers,
         timeout=10.0,
     )
     resp.raise_for_status()
     body = resp.json()
     if body.get("error"):
-        raise RuntimeError(f"Kraken WithdrawMethods 返回错误: {body['error']}")
+        raise RuntimeError(f"Kraken {path} 返回错误: {body['error']}")
+    return body.get("result", {})
+
+
+def _fetch_kraken_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
+    """拉取 Kraken 每个币种支持的提现网络。POST /0/private/WithdrawMethods（签名接口）。"""
+    rows = _kraken_private_post("/0/private/WithdrawMethods", {}, api_key, api_secret)
 
     result: dict[str, set[str]] = defaultdict(set)
-    for row in body.get("result", []):
+    for row in rows:
         base = str(row.get("asset", "")).upper()
         norm = _normalize_chain(str(row.get("network") or row.get("method", "")))
         if base and norm:
             result[base].add(norm)
     return dict(result)
+
+
+def _fetch_kraken_fees(api_key: str, api_secret: str, pairs: set[str]) -> dict[str, float]:
+    """拉取 Kraken 指定交易对的账户真实 taker 费率（按 30 天成交量分档）。
+
+    POST /0/private/TradeVolume（签名接口）。不传 pair 参数该接口不返回 fees，
+    因此必须传入实际用到的 pair 名称列表（即 instrument.raw_symbol）。
+    """
+    result = _kraken_private_post(
+        "/0/private/TradeVolume",
+        {"pair": ",".join(sorted(pairs))},
+        api_key,
+        api_secret,
+    )
+    fees = result.get("fees", {})
+    return {pair: float(info["fee"]) / 100 for pair, info in fees.items() if "fee" in info}
 
 
 # Gate.io currency_chains 接口限速较严，按币种批量拉取时若无间隔很容易触发 429，
@@ -637,6 +671,31 @@ class SpreadMonitor(Strategy):
                     f"最小单量={str(min_q) if min_q is not None else 'N/A'}"
                 )
 
+        # Kraken 真实费率（可选）：配置了 KRAKEN_SPOT_API_KEY/SECRET 时，按实际用到的交易对
+        # 拉取账户 30 天成交量对应的真实 taker 费率，覆盖 DEFAULT_FEES/--fees 里的静态兜底值；
+        # 未配置或拉取失败时静默回退，不影响启动。
+        kraken_pairs = {
+            str(inst.raw_symbol)
+            for info in qualifying.values()
+            for venue, inst in info["secondary_spot"].items()
+            if venue == str(KRAKEN)
+        }
+        kraken_real_fees: dict[str, float] = {}
+        if kraken_pairs:
+            kraken_key = os.environ.get("KRAKEN_SPOT_API_KEY")
+            kraken_secret = os.environ.get("KRAKEN_SPOT_API_SECRET")
+            if kraken_key and kraken_secret:
+                try:
+                    kraken_real_fees = _fetch_kraken_fees(kraken_key, kraken_secret, kraken_pairs)
+                    self.log.info(
+                        f"[fee] {KRAKEN}: 已获取 {len(kraken_real_fees)}/{len(kraken_pairs)} "
+                        "个交易对的真实费率",
+                    )
+                except Exception as exc:  # noqa: BLE001 - 费率仅为增强，拉取失败不应阻断启动
+                    self.log.warning(f"[fee] {KRAKEN} 真实费率拉取失败，回退到默认费率: {exc!r}")
+            else:
+                self.log.info(f"[fee] {KRAKEN}: 未配置 KRAKEN_SPOT_API_KEY/SECRET，使用默认费率")
+
         # 订阅现货行情
         for base, info in sorted(qualifying.items()):
             venues_for_base: dict[str, set] = {"main": set(), "secondary": set()}
@@ -655,7 +714,10 @@ class SpreadMonitor(Strategy):
                 inst_id_str = str(inst.id)
                 self._inst_to_base[inst_id_str] = base
                 self._inst_venue_type[inst_id_str] = "secondary"
-                fee = self._venue_defaults.get(venue, 0.001)
+                if venue == str(KRAKEN) and str(inst.raw_symbol) in kraken_real_fees:
+                    fee = kraken_real_fees[str(inst.raw_symbol)]
+                else:
+                    fee = self._venue_defaults.get(venue, 0.001)
                 self._inst_fee[inst_id_str] = fee
                 venues_for_base["secondary"].add(venue)
                 self.subscribe_quote_ticks(inst.id)
