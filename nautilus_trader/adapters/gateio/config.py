@@ -13,8 +13,10 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from nautilus_trader.adapters.gateio.common.constants import GATEIO_VENUE
 from nautilus_trader.adapters.gateio.common.enums import GateIoAccountType
 from nautilus_trader.config import LiveDataClientConfig
+from nautilus_trader.model.identifiers import Venue
 
 
 class GateIoDataClientConfig(LiveDataClientConfig, frozen=True):
@@ -28,6 +30,10 @@ class GateIoDataClientConfig(LiveDataClientConfig, frozen=True):
     settle : str, default 'usdt'
         The settlement asset for futures contracts. Only consulted when
         `account_type` is `GateIoAccountType.LINEAR`.
+    venue : Venue, default GATEIO_VENUE
+        The venue for the client. Override this (together with the client's registered
+        `name`) to run a spot and a futures Gate.io client side by side in the same
+        `TradingNode`, since both otherwise resolve to the same `client_id`.
     base_url_http : str, optional
         Override the default HTTP base URL.
     base_url_ws : str, optional
@@ -37,5 +43,6 @@ class GateIoDataClientConfig(LiveDataClientConfig, frozen=True):
 
     account_type: GateIoAccountType = GateIoAccountType.SPOT
     settle: str = "usdt"
+    venue: Venue = GATEIO_VENUE
     base_url_http: str | None = None
     base_url_ws: str | None = None

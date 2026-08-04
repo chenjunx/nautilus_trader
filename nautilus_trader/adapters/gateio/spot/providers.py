@@ -26,6 +26,7 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.model.currencies import Currency
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Symbol
+from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments.currency_pair import CurrencyPair
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
@@ -41,6 +42,8 @@ class GateIoSpotInstrumentProvider(InstrumentProvider):
         The HTTP client for the provider.
     clock : LiveClock
         The clock for the provider.
+    venue : Venue, default GATEIO_VENUE
+        The venue to assign to loaded instruments.
     config : InstrumentProviderConfig, optional
         The configuration for the provider.
 
@@ -50,11 +53,13 @@ class GateIoSpotInstrumentProvider(InstrumentProvider):
         self,
         http_client: GateIoSpotHttpClient,
         clock: LiveClock,
+        venue: Venue = GATEIO_VENUE,
         config: InstrumentProviderConfig | None = None,
     ) -> None:
         super().__init__(config=config)
         self._http_client = http_client
         self._clock = clock
+        self._venue = venue
 
     async def load_all_async(self, filters: dict | None = None) -> None:
         self._log.info("Loading all Gate.io spot instruments...")
@@ -78,7 +83,7 @@ class GateIoSpotInstrumentProvider(InstrumentProvider):
 
     def _parse_instrument(self, pair: GateIoCurrencyPair) -> CurrencyPair:
         raw_symbol = Symbol(pair.id)
-        instrument_id = InstrumentId(symbol=raw_symbol, venue=GATEIO_VENUE)
+        instrument_id = InstrumentId(symbol=raw_symbol, venue=self._venue)
         ts_now = self._clock.timestamp_ns()
 
         # Gate.io fee field is a percentage string, e.g. "0.2" means 0.2% = 0.002

@@ -26,6 +26,7 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.model.currencies import Currency
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Symbol
+from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments.crypto_perpetual import CryptoPerpetual
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
@@ -51,6 +52,8 @@ class GateIoFuturesInstrumentProvider(InstrumentProvider):
         The clock for the provider.
     settle : str, default 'usdt'
         The settlement asset for the futures contracts to load.
+    venue : Venue, default GATEIO_VENUE
+        The venue to assign to loaded instruments.
     config : InstrumentProviderConfig, optional
         The configuration for the provider.
 
@@ -61,12 +64,14 @@ class GateIoFuturesInstrumentProvider(InstrumentProvider):
         http_client: GateIoFuturesHttpClient,
         clock: LiveClock,
         settle: str = "usdt",
+        venue: Venue = GATEIO_VENUE,
         config: InstrumentProviderConfig | None = None,
     ) -> None:
         super().__init__(config=config)
         self._http_client = http_client
         self._clock = clock
         self._settle = settle
+        self._venue = venue
 
     async def load_all_async(self, filters: dict | None = None) -> None:
         self._log.info(f"Loading all Gate.io {self._settle}-settled futures instruments...")
@@ -90,7 +95,7 @@ class GateIoFuturesInstrumentProvider(InstrumentProvider):
 
     def _parse_instrument(self, contract: GateIoFuturesContract) -> CryptoPerpetual:
         raw_symbol = Symbol(contract.name)
-        instrument_id = InstrumentId(symbol=raw_symbol, venue=GATEIO_VENUE)
+        instrument_id = InstrumentId(symbol=raw_symbol, venue=self._venue)
         ts_now = self._clock.timestamp_ns()
 
         base_str, _, quote_str = contract.name.partition("_")

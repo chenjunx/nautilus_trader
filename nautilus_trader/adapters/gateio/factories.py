@@ -44,6 +44,7 @@ class GateIoLiveDataClientFactory(LiveDataClientFactory):
                 cache=cache,
                 clock=clock,
                 config=config,
+                name=name,
             )
         return GateIoSpotDataClient(
             loop=loop,
@@ -51,4 +52,5 @@ class GateIoLiveDataClientFactory(LiveDataClientFactory):
             cache=cache,
             clock=clock,
             config=config,
+            name=name,
         )

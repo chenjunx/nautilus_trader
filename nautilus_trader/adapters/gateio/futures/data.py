@@ -17,9 +17,7 @@ import asyncio
 
 import msgspec
 
-from nautilus_trader.adapters.gateio.common.constants import GATEIO_CLIENT_ID
 from nautilus_trader.adapters.gateio.common.constants import GATEIO_FUTURES_WS_BASE_URL_TEMPLATE
-from nautilus_trader.adapters.gateio.common.constants import GATEIO_VENUE
 from nautilus_trader.adapters.gateio.config import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio.futures.http.client import GateIoFuturesHttpClient
 from nautilus_trader.adapters.gateio.futures.providers import GateIoFuturesInstrumentProvider
@@ -34,6 +32,7 @@ from nautilus_trader.data.messages import SubscribeQuoteTicks
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
 from nautilus_trader.live.data_client import LiveMarketDataClient
 from nautilus_trader.model.data import QuoteTick
+from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
@@ -53,6 +52,8 @@ class GateIoFuturesDataClient(LiveMarketDataClient):
         The cache for the client.
     clock : LiveClock
         The clock for the client.
+    name : str, optional
+        The custom client ID.
     config : GateIoDataClientConfig
         The configuration for the client.
 
@@ -65,6 +66,7 @@ class GateIoFuturesDataClient(LiveMarketDataClient):
         cache: Cache,
         clock: LiveClock,
         config: GateIoDataClientConfig,
+        name: str | None = None,
     ) -> None:
         self._settle = config.settle
         self._http_client = GateIoFuturesHttpClient(base_url=config.base_url_http)
@@ -72,13 +74,14 @@ class GateIoFuturesDataClient(LiveMarketDataClient):
             http_client=self._http_client,
             clock=clock,
             settle=self._settle,
+            venue=config.venue,
             config=config.instrument_provider,
         )
 
         super().__init__(
             loop=loop,
-            client_id=GATEIO_CLIENT_ID,
-            venue=GATEIO_VENUE,
+            client_id=ClientId(name or config.venue.value),
+            venue=config.venue,
             msgbus=msgbus,
             cache=cache,
             clock=clock,
