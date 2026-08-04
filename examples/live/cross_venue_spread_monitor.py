@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """
 Cross-venue USDT spot spread monitor - main vs secondary venues.
-监控主所（Binance/Bybit）与副所（Kraken 等）之间的 USDT 现货价差。
+监控主所与副所之间的 USDT 现货价差。
+
+主副所判定规则:
+  一个所只要同时有 USDT 现货 + USDT 永续，就是主所（如 Binance、Gate.io、OKX）；
+  否则只能是副所，只交易现货（如 Kraken，其永续以 USD 结算，不满足 USDT 永续）。
+  主副所唯一的业务差异：开仓（永续对冲敞口）只能在主所做，副所只做现货、不参与开仓，
+  因此主所可以两两配对算价差，副所必须至少一侧是主所才能配对（两个纯现货副所之间
+  没有可执行的对冲路径，不允许配对）。
+  Binance/Gate.io 的现货与永续共用同一交易所账号，通过独立 venue key 拆成两个
+  client 以避免 client_id 冲突：BINANCE/BINANCE_FUT、GATEIO/GATEIO_FUT；
+  OKX 的现货+永续可在同一个 client 里一起加载，无需拆分。
 
 筛选规则（--mode auto，默认）:
-  1. 币种在任意主所同时有 USDT 现货 + USDT/USD 永续
-  2. 币种在同一副所同时有 USDT 现货 + USDT/USD 永续（严格同所匹配；
-     永续接受 USD 报价，因 Kraken 永续以 USD 结算，无 USDT 永续）
+  1. 币种在任意主所同时有 USDT 现货 + USDT 永续（保留对冲能力前提）
+  2. 该币种在其余任意主所/副所上找到的 USDT 现货全部纳入配对候选
   3. 黑名单币种（BTC/ETH/SOL/XRP/BNB）直接排除
 
 筛选规则（--mode manual）:
@@ -23,7 +32,7 @@ Cross-venue USDT spot spread monitor - main vs secondary venues.
 费用模型（单边）:
   买入成本 = ask × (1 + taker_fee + slippage)
   卖出收益 = bid × (1 - taker_fee - slippage)
-  净价差   = 卖出收益 - 买入成本（仅计算主所→副所或副所→主所方向）
+  净价差   = 卖出收益 - 买入成本（主所↔主所、主所↔副所方向；副所↔副所不计算）
 
 Usage:
     python examples/live/cross_venue_spread_monitor.py
@@ -57,6 +66,7 @@ from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.adapters.gateio import GATEIO
+from nautilus_trader.adapters.gateio import GateIoAccountType
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KRAKEN
@@ -64,10 +74,16 @@ from nautilus_trader.adapters.kraken import KrakenDataClientConfig
 from nautilus_trader.adapters.kraken import KrakenEnvironment
 from nautilus_trader.adapters.kraken import KrakenLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KrakenProductType
+from nautilus_trader.adapters.okx import OKX
+from nautilus_trader.adapters.okx import OKXDataClientConfig
+from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.core.nautilus_pyo3 import OKXContractType
+from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
+from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.instruments import CryptoPerpetual
@@ -77,14 +93,17 @@ from nautilus_trader.trading.strategy import Strategy
 
 # Binance futures 使用独立 venue key，便于与现货区分
 BINANCE_FUT_KEY = "BINANCE_FUT"
+# Gate.io 永续同理，使用独立 venue key 与现货区分（二者共用同一交易所账号，
+# 适配器层已支持通过 venue+name 拆分成两个独立 client，避免 client_id 冲突）
+GATEIO_FUT_KEY = "GATEIO_FUT"
 
 # 交易所配置总表：新增/删除一个所，只需在此增删一条记录。
-# roles: "main_spot" | "main_perp" | "secondary" | "secondary_perp"
+# roles: "main_spot" | "main_perp" | "secondary"
+#   一个所若同时具备 main_spot + main_perp（USDT 现货 + USDT 永续）即为主所；
+#   只有 secondary 角色的所为副所，只交易现货，不参与开仓/永续对冲。
 # instrument_venue: 该 client 加载出来的 instrument 实际挂的 venue（默认等于 key）。
-# Binance 永续通过 venue= 参数覆盖，key 与实际 venue 一致。
-# 注：Gate.io 现货/永续 client 在适配器里 client_id 都硬编码为 GATEIO，无法在同一
-# TradingNode 里同时注册两个 Gate.io client（会因 client_id 冲突报错），因此 Gate.io
-# 暂不接入永续，副所永续只由 Kraken 提供。
+# Binance/Gate.io 永续都通过 venue= 参数覆盖，与现货 client 拆成两个独立 key/venue，
+# 避免同一交易所现货+永续 client_id 冲突。
 VENUE_REGISTRY: list[dict] = [
     {
         "key": BINANCE,
@@ -111,10 +130,10 @@ VENUE_REGISTRY: list[dict] = [
     },
     {
         "key": KRAKEN,
-        "roles": {"secondary", "secondary_perp"},
+        "roles": {"secondary"},
         "config": lambda: KrakenDataClientConfig(
             environment=KrakenEnvironment.LIVE,
-            product_types=(KrakenProductType.SPOT, KrakenProductType.FUTURES),
+            product_types=(KrakenProductType.SPOT,),
             instrument_provider=InstrumentProviderConfig(load_all=True),
         ),
         "factory": KrakenLiveDataClientFactory,
@@ -122,12 +141,37 @@ VENUE_REGISTRY: list[dict] = [
     },
     {
         "key": GATEIO,
-        "roles": {"secondary"},
+        "roles": {"main_spot"},
         "config": lambda: GateIoDataClientConfig(
             instrument_provider=InstrumentProviderConfig(load_all=True),
         ),
         "factory": GateIoLiveDataClientFactory,
         "default_fee": 0.00080,
+    },
+    {
+        "key": GATEIO_FUT_KEY,
+        "roles": {"main_perp"},
+        "config": lambda: GateIoDataClientConfig(
+            venue=Venue(GATEIO_FUT_KEY),
+            account_type=GateIoAccountType.LINEAR,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": GateIoLiveDataClientFactory,
+        "default_fee": 0.00050,   # Gate.io USDT 永续 taker 费率，需按实际账户等级核实
+    },
+    {
+        # OKX 现货与 USDT 永续可共用同一个 client 一起加载（不像 Binance/Gate.io 需要
+        # 独立账户类型/venue 拆分），因此单条记录即可同时具备 main_spot + main_perp。
+        "key": OKX,
+        "roles": {"main_spot", "main_perp"},
+        "config": lambda: OKXDataClientConfig(
+            environment=OKXEnvironment.LIVE,
+            instrument_types=(OKXInstrumentType.SPOT, OKXInstrumentType.SWAP),
+            contract_types=(OKXContractType.LINEAR,),   # LINEAR = USDT/USDC 保证金永续，quote=="USDT" 过滤已在选币逻辑里处理
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": OKXLiveDataClientFactory,
+        "default_fee": 0.00080,   # OKX 现货 taker，需按实际账户等级核实
     },
 ]
 
@@ -135,12 +179,8 @@ VENUE_REGISTRY: list[dict] = [
 MAIN_SPOT_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "main_spot" in v["roles"]}
 MAIN_PERP_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "main_perp" in v["roles"]}
 
-# 副所（现货）
+# 副所（只交易现货，不参与开仓/永续对冲）
 SECONDARY_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "secondary" in v["roles"]}
-# 副所（永续，用于要求"副所同一所同时有现货+永续"）
-SECONDARY_PERP_VENUES = {
-    str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "secondary_perp" in v["roles"]
-}
 
 # 黑名单：流动性过高，套利竞争激烈
 BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
@@ -415,11 +455,11 @@ class SpreadMonitor(Strategy):
         self._last_health_check: float = 0.0
 
     def _build_auto_qualifying(self, instruments: list) -> tuple[dict, set, set]:
-        """自动发现模式：主所现货+永续、同一副所现货+永续 都齐全的币种才入选。"""
+        """自动发现模式：至少一个主所同时有 USDT 现货+永续（保留对冲能力）的币种才入选，
+        其余主所/副所上能找到的 USDT 现货全部纳入配对候选。"""
         main_spot: dict[str, dict[str, object]] = defaultdict(dict)   # {base: {venue: inst}}
         main_perp: dict[str, set] = defaultdict(set)                   # {base: {venue}}
         secondary_spot: dict[str, dict[str, object]] = defaultdict(dict)
-        secondary_perp: dict[str, set] = defaultdict(set)               # {base: {venue}}
 
         for inst in instruments:
             try:
@@ -442,31 +482,16 @@ class SpreadMonitor(Strategy):
                     secondary_spot[base][venue] = inst
 
             elif isinstance(inst, CryptoPerpetual):
-                # Kraken 永续以 USD 结算/报价（无 USDT 永续），语义上等价于 USDT 永续，一并接受
-                if quote not in ("USDT", "USD"):
+                if quote != "USDT" or venue not in MAIN_PERP_VENUES:
                     continue
-                if venue in MAIN_PERP_VENUES:
-                    main_perp[base].add(venue)
-                elif venue in SECONDARY_PERP_VENUES:
-                    secondary_perp[base].add(venue)
+                main_perp[base].add(venue)
 
-        # 筛选：任意主所同时有现货+永续，且同一副所也同时有现货+永续
+        # 筛选：至少一个主所同时有现货+永续；副所现货存在即可纳入，不再要求副所有永续
         qualifying: dict[str, dict] = {}
         for base in set(main_spot) & set(main_perp):
-            if base not in secondary_spot:
-                continue
-
-            # 同一副所需同时有现货和永续，只保留满足条件的副所
-            matched_secondary_venues = set(secondary_spot[base].keys()) & secondary_perp[base]
-            if not matched_secondary_venues:
-                continue
-            matched_secondary_spot = {
-                v: inst for v, inst in secondary_spot[base].items() if v in matched_secondary_venues
-            }
-
             qualifying[base] = {
                 "main_spot": main_spot[base],
-                "secondary_spot": matched_secondary_spot,
+                "secondary_spot": secondary_spot.get(base, {}),
             }
 
         return qualifying, MAIN_SPOT_VENUES, SECONDARY_VENUES
@@ -736,7 +761,7 @@ class SpreadMonitor(Strategy):
         base_info: dict[str, set],
     ) -> tuple | None:
         """
-        只比较主所→副所和副所→主所方向（不比较主所之间）。
+        主所↔主所、主所↔副所均可配对；副所↔副所不配对（两侧都不能开仓对冲，无可执行路径）。
         净价差 = 卖出收益 - 买入成本
                = bid_sell × (1 - fee_s - slip) - ask_buy × (1 + fee_b + slip)
         """
@@ -745,33 +770,35 @@ class SpreadMonitor(Strategy):
             return None
 
         slip = self._slippage
-        main_venues = base_info.get("main", set()) & venue_data.keys()
         sec_venues = base_info.get("secondary", set()) & venue_data.keys()
+        all_venues = list(venue_data.keys())
 
         best_net = float("-inf")
         best: tuple | None = None
 
-        # 遍历所有主所↔副所组合（双向）
-        for buy_v, sell_v in (
-            [(m, s) for m in main_venues for s in sec_venues] +
-            [(s, m) for s in sec_venues for m in main_venues]
-        ):
-            ask = venue_data[buy_v][1]
-            bid = venue_data[sell_v][0]
-            # 找对应的 inst_id_str 来获取费率
-            fee_b = next((self._inst_fee[k] for k in self._inst_fee
-                          if self._inst_to_base.get(k) == base and buy_v in k),
-                         self._venue_defaults.get(buy_v, 0.001))
-            fee_s = next((self._inst_fee[k] for k in self._inst_fee
-                          if self._inst_to_base.get(k) == base and sell_v in k),
-                         self._venue_defaults.get(sell_v, 0.001))
+        for buy_v in all_venues:
+            for sell_v in all_venues:
+                if buy_v == sell_v:
+                    continue
+                if buy_v in sec_venues and sell_v in sec_venues:
+                    continue
 
-            net = bid * (1 - fee_s - slip) - ask * (1 + fee_b + slip)
-            if net > best_net:
-                best_net = net
-                gross_pct = (bid - ask) / mid * 100
-                net_pct = net / mid * 100
-                best = (gross_pct, net_pct, buy_v, ask, fee_b, sell_v, bid, fee_s)
+                ask = venue_data[buy_v][1]
+                bid = venue_data[sell_v][0]
+                # 找对应的 inst_id_str 来获取费率
+                fee_b = next((self._inst_fee[k] for k in self._inst_fee
+                              if self._inst_to_base.get(k) == base and buy_v in k),
+                             self._venue_defaults.get(buy_v, 0.001))
+                fee_s = next((self._inst_fee[k] for k in self._inst_fee
+                              if self._inst_to_base.get(k) == base and sell_v in k),
+                             self._venue_defaults.get(sell_v, 0.001))
+
+                net = bid * (1 - fee_s - slip) - ask * (1 + fee_b + slip)
+                if net > best_net:
+                    best_net = net
+                    gross_pct = (bid - ask) / mid * 100
+                    net_pct = net / mid * 100
+                    best = (gross_pct, net_pct, buy_v, ask, fee_b, sell_v, bid, fee_s)
 
         return best
 
