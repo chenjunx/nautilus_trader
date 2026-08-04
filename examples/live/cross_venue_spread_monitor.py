@@ -3,10 +3,21 @@
 Cross-venue USDT spot spread monitor - main vs secondary venues.
 监控主所（Binance/Bybit）与副所（Kraken 等）之间的 USDT 现货价差。
 
-筛选规则:
+筛选规则（--mode auto，默认）:
   1. 币种在任意主所同时有 USDT 现货 + USDT 永续
-  2. 副所也有该币的 USDT 现货
+  2. 币种在同一副所同时有 USDT 现货 + USDT 永续（严格同所匹配）
   3. 黑名单币种（BTC/ETH/SOL/XRP/BNB）直接排除
+
+筛选规则（--mode manual）:
+  通过 --symbols/--main/--secondary 手动指定币种和主副所，跳过上述自动发现规则；
+  只要求指定币种在指定的主所、副所上各至少能找到一个 USDT 现货（不校验永续，不受黑名单限制）。
+
+筛选规则（提现链，--require-common-chain，默认开启）:
+  主所与副所必须至少有一条共同支持的提现/充值链（如都支持 TRC20），否则资金无法跨所转移，
+  该币种会被剔除。需要 Binance/Kraken 的私有 API Key（Gate.io 接口为公开接口，无需 Key）：
+    BINANCE_API_KEY / BINANCE_API_SECRET
+    KRAKEN_SPOT_API_KEY / KRAKEN_SPOT_API_SECRET
+  凭据缺失时直接报错退出；可用 --no-require-common-chain 关闭该规则（无需任何 Key）。
 
 费用模型（单边）:
   买入成本 = ask × (1 + taker_fee + slippage)
@@ -17,26 +28,33 @@ Usage:
     python examples/live/cross_venue_spread_monitor.py
     python examples/live/cross_venue_spread_monitor.py --alert-only
     python examples/live/cross_venue_spread_monitor.py --slippage 0.001 --fees KRAKEN=0.002
+    python examples/live/cross_venue_spread_monitor.py --mode manual \
+        --symbols BTC,ETH --main BINANCE --secondary KRAKEN,GATEIO
+    BINANCE_API_KEY=... BINANCE_API_SECRET=... \
+    KRAKEN_SPOT_API_KEY=... KRAKEN_SPOT_API_SECRET=... \
+        python examples/live/cross_venue_spread_monitor.py
+    python examples/live/cross_venue_spread_monitor.py --no-require-common-chain
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
+import os
 import sys
 import time
+import urllib.parse
 from collections import defaultdict
 from collections import deque
+
+import httpx
 
 from nautilus_trader.adapters.binance import BINANCE
 from nautilus_trader.adapters.binance import BinanceDataClientConfig
 from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
-from nautilus_trader.adapters.bitfinex import BITFINEX
-from nautilus_trader.adapters.bitfinex import BitfinexDataClientConfig
-from nautilus_trader.adapters.bitfinex import BitfinexLiveDataClientFactory
-from nautilus_trader.adapters.okx import OKX
-from nautilus_trader.adapters.okx import OKXDataClientConfig
-from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.adapters.gateio import GATEIO
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
@@ -47,8 +65,6 @@ from nautilus_trader.adapters.kraken import KrakenLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KrakenProductType
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
-from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
-from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
@@ -61,25 +77,228 @@ from nautilus_trader.trading.strategy import Strategy
 # Binance futures 使用独立 venue key，便于与现货区分
 BINANCE_FUT_KEY = "BINANCE_FUT"
 
-# 主所（有永续 + 现货）
-MAIN_SPOT_VENUES = {str(BINANCE), str(OKX)}
-MAIN_PERP_VENUES = {BINANCE_FUT_KEY, str(OKX)}
+# 交易所配置总表：新增/删除一个所，只需在此增删一条记录。
+# roles: "main_spot" | "main_perp" | "secondary"
+VENUE_REGISTRY: list[dict] = [
+    {
+        "key": BINANCE,
+        "roles": {"main_spot"},
+        "config": lambda: BinanceDataClientConfig(
+            environment=BinanceEnvironment.LIVE,
+            account_type=BinanceAccountType.SPOT,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": BinanceLiveDataClientFactory,
+        "default_fee": 0.00075,   # BNB 折扣后
+    },
+    {
+        "key": BINANCE_FUT_KEY,
+        "roles": {"main_perp"},
+        "config": lambda: BinanceDataClientConfig(
+            venue=Venue(BINANCE_FUT_KEY),
+            environment=BinanceEnvironment.LIVE,
+            account_type=BinanceAccountType.USDT_FUTURES,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": BinanceLiveDataClientFactory,
+        "default_fee": None,
+    },
+    {
+        "key": KRAKEN,
+        "roles": {"secondary", "secondary_perp"},
+        "config": lambda: KrakenDataClientConfig(
+            environment=KrakenEnvironment.LIVE,
+            product_types=(KrakenProductType.SPOT, KrakenProductType.FUTURES),
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": KrakenLiveDataClientFactory,
+        "default_fee": 0.00050,   # 30天量 >$50k
+    },
+    {
+        "key": GATEIO,
+        "roles": {"secondary"},
+        "config": lambda: GateIoDataClientConfig(
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": GateIoLiveDataClientFactory,
+        "default_fee": 0.00080,
+    },
+]
 
-# 副所（仅现货）
-SECONDARY_VENUES = {str(KRAKEN), str(GATEIO), str(BITFINEX)}
+# 主所（有永续 + 现货）
+MAIN_SPOT_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "main_spot" in v["roles"]}
+MAIN_PERP_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "main_perp" in v["roles"]}
+
+# 副所（现货）
+SECONDARY_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "secondary" in v["roles"]}
+# 副所（永续，用于要求"副所同一所同时有现货+永续"）
+SECONDARY_PERP_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "secondary_perp" in v["roles"]}
 
 # 黑名单：流动性过高，套利竞争激烈
 BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 
-
 # 各所折扣后 taker 费率默认值
 DEFAULT_FEES: dict[str, float] = {
-    str(BINANCE): 0.00075,   # BNB 折扣后
-    str(OKX):     0.00080,   # Lv1 折扣后
-    str(KRAKEN):   0.00050,   # 30天量 >$50k
-    str(GATEIO):   0.00080,
-    str(BITFINEX): 0.00200,   # 标准 taker 0.2%
+    str(v["key"]): v["default_fee"] for v in VENUE_REGISTRY if v["default_fee"] is not None
 }
+
+
+def _parse_csv_set(csv_str: str) -> set[str]:
+    return {part.strip().upper() for part in csv_str.split(",") if part.strip()}
+
+
+# 各所提现/充值网络命名不统一，归一化到统一 key 后再比较是否有共同链
+CHAIN_ALIASES: dict[str, str] = {
+    "TRC20": "TRX", "TRON": "TRX", "TRX": "TRX",
+    "ERC20": "ETH", "ETHEREUM": "ETH", "ETH": "ETH",
+    "BEP20": "BSC", "BSC": "BSC",
+    "BNB SMART CHAIN (BEP20)": "BSC", "BNB SMART CHAIN": "BSC",
+    "BEP2": "BNB", "BNB BEACON CHAIN (BEP2)": "BNB",
+    "MATIC": "MATIC", "POLYGON": "MATIC",
+    "ARBITRUM": "ARBITRUM", "ARBITRUM ONE": "ARBITRUM",
+    "OPTIMISM": "OPTIMISM",
+    "SOL": "SOL", "SOLANA": "SOL",
+    "AVAXC": "AVAXC", "AVALANCHE C-CHAIN": "AVAXC", "AVAX C-CHAIN": "AVAXC",
+}
+
+
+def _normalize_chain(raw: str) -> str:
+    return CHAIN_ALIASES.get(raw.strip().upper(), raw.strip().upper())
+
+
+def _fetch_binance_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
+    """拉取 Binance 每个币种支持的提现网络。GET /sapi/v1/capital/config/getall（签名接口）。"""
+    ts = int(time.time() * 1000)
+    query = f"timestamp={ts}"
+    sig = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    url = f"https://api.binance.com/sapi/v1/capital/config/getall?{query}&signature={sig}"
+    resp = httpx.get(url, headers={"X-MBX-APIKEY": api_key}, timeout=10.0)
+    resp.raise_for_status()
+
+    result: dict[str, set[str]] = {}
+    for coin in resp.json():
+        base = str(coin.get("coin", "")).upper()
+        chains = {_normalize_chain(n.get("network", "")) for n in coin.get("networkList", [])}
+        chains.discard("")
+        if base and chains:
+            result[base] = chains
+    return result
+
+
+def _fetch_kraken_chains(api_key: str, api_secret: str) -> dict[str, set[str]]:
+    """拉取 Kraken 每个币种支持的提现网络。POST /0/private/WithdrawMethods（签名接口）。"""
+    path = "/0/private/WithdrawMethods"
+    nonce = str(int(time.time() * 1000))
+    postdata = urllib.parse.urlencode({"nonce": nonce})
+    sha = hashlib.sha256((nonce + postdata).encode()).digest()
+    sig = base64.b64encode(
+        hmac.new(base64.b64decode(api_secret), path.encode() + sha, hashlib.sha512).digest(),
+    ).decode()
+    headers = {"API-Key": api_key, "API-Sign": sig}
+    resp = httpx.post(
+        f"https://api.kraken.com{path}",
+        data={"nonce": nonce},
+        headers=headers,
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("error"):
+        raise RuntimeError(f"Kraken WithdrawMethods 返回错误: {body['error']}")
+
+    result: dict[str, set[str]] = defaultdict(set)
+    for row in body.get("result", []):
+        base = str(row.get("asset", "")).upper()
+        norm = _normalize_chain(str(row.get("network") or row.get("method", "")))
+        if base and norm:
+            result[base].add(norm)
+    return dict(result)
+
+
+def _fetch_gateio_chains() -> dict[str, set[str]]:
+    """拉取 Gate.io 每个币种支持的提现网络。GET /api/v4/wallet/currency_chains（公开接口）。"""
+    resp = httpx.get("https://api.gateio.ws/api/v4/wallet/currency_chains", timeout=10.0)
+    resp.raise_for_status()
+
+    result: dict[str, set[str]] = defaultdict(set)
+    for row in resp.json():
+        base = str(row.get("currency", "")).upper()
+        norm = _normalize_chain(str(row.get("chain", "")))
+        if base and norm:
+            result[base].add(norm)
+    return dict(result)
+
+
+def _dump_chains(symbols_csv: str) -> None:
+    """调试用：按所拉取并打印提现链原始数据（归一化后），不启动实时监控。"""
+    symbols = _parse_csv_set(symbols_csv) if symbols_csv else None
+
+    binance_key = os.environ.get("BINANCE_API_KEY")
+    binance_secret = os.environ.get("BINANCE_API_SECRET")
+    kraken_key = os.environ.get("KRAKEN_SPOT_API_KEY")
+    kraken_secret = os.environ.get("KRAKEN_SPOT_API_SECRET")
+
+    fetchers: dict[str, object] = {GATEIO: _fetch_gateio_chains}  # 公开接口，始终拉取
+
+    if binance_key and binance_secret:
+        fetchers[BINANCE] = lambda: _fetch_binance_chains(binance_key, binance_secret)
+    else:
+        print(f"[dump] 跳过 {BINANCE}：缺少 BINANCE_API_KEY/BINANCE_API_SECRET")
+
+    if kraken_key and kraken_secret:
+        fetchers[KRAKEN] = lambda: _fetch_kraken_chains(kraken_key, kraken_secret)
+    else:
+        print(f"[dump] 跳过 {KRAKEN}：缺少 KRAKEN_SPOT_API_KEY/KRAKEN_SPOT_API_SECRET")
+
+    for venue, fetch in fetchers.items():
+        print(f"\n{'='*60}\n[{venue}] 提现链数据\n{'='*60}")
+        try:
+            data = fetch()
+        except Exception as exc:  # noqa: BLE001 - 调试工具，任何异常都要打印出来看
+            print(f"  拉取失败: {exc!r}")
+            continue
+
+        shown = 0
+        for base in sorted(data):
+            if symbols and base not in symbols:
+                continue
+            print(f"  {base:<10} {sorted(data[base])}")
+            shown += 1
+        suffix = f"（已按 --dump-symbols 过滤，总共 {len(data)} 个币种）" if symbols else ""
+        print(f"  共显示 {shown} 个币种{suffix}")
+
+
+def _load_chain_support(relevant_venues: set[str]) -> dict[str, dict[str, set[str]]]:
+    """按需拉取各所的提现链数据。缺少对应所的 API Key 时直接报错退出。"""
+    chains: dict[str, dict[str, set[str]]] = {}
+
+    if BINANCE in relevant_venues:
+        key = os.environ.get("BINANCE_API_KEY")
+        secret = os.environ.get("BINANCE_API_SECRET")
+        if not key or not secret:
+            sys.exit(
+                "[chain] 缺少 BINANCE_API_KEY/BINANCE_API_SECRET，无法校验提现链"
+                "（可用 --no-require-common-chain 关闭该规则）",
+            )
+        chains[BINANCE] = _fetch_binance_chains(key, secret)
+        print(f"[chain] {BINANCE}: {len(chains[BINANCE])} 个币种的提现链数据")
+
+    if KRAKEN in relevant_venues:
+        key = os.environ.get("KRAKEN_SPOT_API_KEY")
+        secret = os.environ.get("KRAKEN_SPOT_API_SECRET")
+        if not key or not secret:
+            sys.exit(
+                "[chain] 缺少 KRAKEN_SPOT_API_KEY/KRAKEN_SPOT_API_SECRET，无法校验提现链"
+                "（可用 --no-require-common-chain 关闭该规则）",
+            )
+        chains[KRAKEN] = _fetch_kraken_chains(key, secret)
+        print(f"[chain] {KRAKEN}: {len(chains[KRAKEN])} 个币种的提现链数据")
+
+    if GATEIO in relevant_venues:
+        chains[GATEIO] = _fetch_gateio_chains()
+        print(f"[chain] {GATEIO}: {len(chains[GATEIO])} 个币种的提现链数据")
+
+    return chains
 
 
 def parse_fees_arg(fees_str: str) -> dict[str, float]:
@@ -108,6 +327,14 @@ class SpreadMonitorConfig(StrategyConfig, frozen=True):
     slippage: float = 0.0002
     alert_only: bool = False
     venue_fees_json: str = "{}"
+    # 匹配模式："auto"（自动发现，默认）或 "manual"（手动指定币种+主副所）
+    mode: str = "auto"
+    manual_symbols_csv: str = ""
+    manual_main_csv: str = ""
+    manual_secondary_csv: str = ""
+    # 提现链匹配：主所与副所至少要有一条共同支持的提现/充值链
+    require_common_chain: bool = True
+    chain_support_json: str = "{}"
     # 链路健康度检测
     health_window_secs: float = 30.0
     health_warmup_secs: float = 60.0
@@ -139,6 +366,18 @@ class SpreadMonitor(Strategy):
         self._alert_only = config.alert_only
         self._venue_defaults: dict[str, float] = json.loads(config.venue_fees_json)
 
+        self._mode = config.mode
+        self._manual_symbols = _parse_csv_set(config.manual_symbols_csv)
+        self._manual_main_venues = _parse_csv_set(config.manual_main_csv)
+        self._manual_secondary_venues = _parse_csv_set(config.manual_secondary_csv)
+
+        self._require_common_chain = config.require_common_chain
+        raw_chain_support = json.loads(config.chain_support_json)
+        self._chain_support: dict[str, dict[str, set[str]]] = {
+            venue: {base: set(chains) for base, chains in per_base.items()}
+            for venue, per_base in raw_chain_support.items()
+        }
+
         # 链路健康度检测（venue 级别，基于消息速率）
         self._health_window_secs = config.health_window_secs
         self._health_warmup_secs = config.health_warmup_secs
@@ -154,14 +393,12 @@ class SpreadMonitor(Strategy):
         self._start_time: float = 0.0
         self._last_health_check: float = 0.0
 
-    def on_start(self) -> None:
-        instruments = self.cache.instruments()
-        self.log.info(f"Cache contains {len(instruments)} instruments")
-
-        # 分类所有 USDT 品种
+    def _build_auto_qualifying(self, instruments: list) -> tuple[dict, set, set]:
+        """自动发现模式：主所现货+永续、同一副所现货+永续 都齐全的币种才入选。"""
         main_spot: dict[str, dict[str, object]] = defaultdict(dict)   # {base: {venue: inst}}
         main_perp: dict[str, set] = defaultdict(set)                   # {base: {venue}}
         secondary_spot: dict[str, dict[str, object]] = defaultdict(dict)
+        secondary_perp: dict[str, set] = defaultdict(set)               # {base: {venue}}
 
         for inst in instruments:
             try:
@@ -184,51 +421,135 @@ class SpreadMonitor(Strategy):
             elif isinstance(inst, CryptoPerpetual):
                 if venue in MAIN_PERP_VENUES:
                     main_perp[base].add(venue)
+                elif venue in SECONDARY_PERP_VENUES:
+                    secondary_perp[base].add(venue)
 
-        # 筛选：主所同时有现货+永续，且副所有现货
+        # 筛选：任意主所同时有现货+永续，且同一副所也同时有现货+永续
         qualifying: dict[str, dict] = {}
         for base in set(main_spot) & set(main_perp):
             if base not in secondary_spot:
                 continue
-            # 至少有一个主所同时有现货和永续
-            main_spot_venues = set(main_spot[base].keys())
-            main_perp_venues = main_perp[base]
-            if not (main_spot_venues & main_perp_venues) and \
-               not (main_spot_venues and main_perp_venues):
-                # 宽松判断：任意主所有现货 且 任意主所（可不同）有永续
-                pass
+
+            # 同一副所需同时有现货和永续，只保留满足条件的副所
+            matched_secondary_venues = set(secondary_spot[base].keys()) & secondary_perp[base]
+            if not matched_secondary_venues:
+                continue
+            matched_secondary_spot = {
+                v: inst for v, inst in secondary_spot[base].items() if v in matched_secondary_venues
+            }
 
             qualifying[base] = {
                 "main_spot": main_spot[base],
-                "secondary_spot": secondary_spot[base],
+                "secondary_spot": matched_secondary_spot,
             }
 
-        # 打印配对详情及各所合约规格
-        print(f"\n{'='*88}")
-        print(f"[SpreadMonitor] 配对完成，共 {len(qualifying)} 个 USDT 交易对")
-        print(f"  主所: {MAIN_SPOT_VENUES}  副所: {SECONDARY_VENUES}")
+        return qualifying, MAIN_SPOT_VENUES, SECONDARY_VENUES
+
+    def _build_manual_qualifying(self, instruments: list) -> tuple[dict, set, set]:
+        """手动模式：只看 --symbols/--main/--secondary 指定的币种和所，不校验永续、不受黑名单限制。"""
+        main_venues = self._manual_main_venues
+        secondary_venues = self._manual_secondary_venues
+        symbols = self._manual_symbols
+
+        main_spot: dict[str, dict[str, object]] = defaultdict(dict)
+        secondary_spot: dict[str, dict[str, object]] = defaultdict(dict)
+
+        for inst in instruments:
+            if not isinstance(inst, CurrencyPair):
+                continue
+            try:
+                base = str(inst.base_currency)
+                quote = str(inst.quote_currency)
+            except AttributeError:
+                continue
+
+            if quote != "USDT" or base not in symbols:
+                continue
+
+            venue = str(inst.id.venue)
+            if venue in main_venues:
+                main_spot[base][venue] = inst
+            elif venue in secondary_venues:
+                secondary_spot[base][venue] = inst
+
+        qualifying: dict[str, dict] = {}
+        for base in sorted(symbols):
+            found_main = main_spot.get(base, {})
+            found_secondary = secondary_spot.get(base, {})
+            if not found_main or not found_secondary:
+                self.log.warning(
+                    f"[manual] 跳过 {base}：主所现货={sorted(found_main) or '无'}  "
+                    f"副所现货={sorted(found_secondary) or '无'}",
+                )
+                continue
+            qualifying[base] = {
+                "main_spot": found_main,
+                "secondary_spot": found_secondary,
+            }
+
+        return qualifying, main_venues, secondary_venues
+
+    def _filter_by_common_chain(self, qualifying: dict[str, dict]) -> dict[str, dict]:
+        """剔除主所与副所没有共同提现链的币种（主所整体 ∩ 副所整体，链集合取并集后比较）。"""
+        if not self._require_common_chain:
+            return qualifying
+
+        result: dict[str, dict] = {}
+        for base, info in qualifying.items():
+            main_chains: set[str] = set()
+            for venue in info["main_spot"]:
+                main_chains |= self._chain_support.get(venue, {}).get(base, set())
+
+            sec_chains: set[str] = set()
+            for venue in info["secondary_spot"]:
+                sec_chains |= self._chain_support.get(venue, {}).get(base, set())
+
+            common = main_chains & sec_chains
+            if not common:
+                self.log.warning(
+                    f"[chain] 跳过 {base}：主所链={sorted(main_chains) or '无'}  "
+                    f"副所链={sorted(sec_chains) or '无'}，无共同提现链",
+                )
+                continue
+
+            result[base] = info
+
+        return result
+
+    def on_start(self) -> None:
+        instruments = self.cache.instruments()
+        self.log.info(f"Cache contains {len(instruments)} instruments")
+
+        if self._mode == "manual":
+            qualifying, main_venues, secondary_venues = self._build_manual_qualifying(instruments)
+        else:
+            qualifying, main_venues, secondary_venues = self._build_auto_qualifying(instruments)
+
+        qualifying = self._filter_by_common_chain(qualifying)
+
+        # 配对详情及各所合约规格（较为冗长，降为 debug 级别）
+        self.log.info(f"[SpreadMonitor] 配对完成（模式={self._mode}），共 {len(qualifying)} 个 USDT 交易对")
+        self.log.info(f"主所: {main_venues}  副所: {secondary_venues}")
         if not self._alert_only:
-            print(f"  净价差阈值: {self._min_net_pct}%  滑点: {self._slippage*100:.4f}%")
-        print()
+            self.log.info(f"净价差阈值: {self._min_net_pct}%  滑点: {self._slippage*100:.4f}%")
         for base in sorted(qualifying):
             info = qualifying[base]
             all_insts: dict[str, object] = {**info["main_spot"], **info["secondary_spot"]}
-            print(f"  {base}/USDT")
+            self.log.debug(f"{base}/USDT")
             for venue in sorted(all_insts):
                 inst = all_insts[venue]
-                role = "主" if venue in MAIN_SPOT_VENUES else "副"
+                role = "主" if venue in main_venues else "副"
                 min_n = inst.min_notional
                 max_q = inst.max_quantity
                 min_q = inst.min_quantity
-                print(
-                    f"    [{role}] {venue:<12} "
+                self.log.debug(
+                    f"  [{role}] {venue:<12} "
                     f"价格步长={inst.price_increment}  "
                     f"数量步长={inst.size_increment}  "
                     f"最小名义={str(min_n) if min_n is not None else 'N/A':>12}  "
                     f"最大单量={str(max_q) if max_q is not None else 'N/A':>14}  "
                     f"最小单量={str(min_q) if min_q is not None else 'N/A'}"
                 )
-        print(f"{'='*88}\n")
 
         # 订阅现货行情
         for base, info in sorted(qualifying.items()):
@@ -496,6 +817,9 @@ class SpreadMonitor(Strategy):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="跨所 USDT 现货净价差监控（主所↔副所）")
+    parser.add_argument("--log-level", type=str, default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="日志级别（默认 INFO；设为 DEBUG 可看到每个币种的合约规格明细）")
     parser.add_argument("--min-net", type=float, default=0.0,
                         help="最小净价差打印阈值（百分比，默认 0.0）")
     parser.add_argument("--throttle", type=float, default=2.0,
@@ -508,7 +832,34 @@ def main() -> None:
                         help="单边滑点估算（默认 0.0002 = 0.02%%）")
     parser.add_argument("--alert-only", action="store_true",
                         help="只在 net>0 时输出，适合后台运行")
+    parser.add_argument("--mode", choices=["auto", "manual"], default="auto",
+                        help="匹配模式：auto=自动发现（默认），manual=手动指定币种和主副所")
+    parser.add_argument("--symbols", type=str, default="",
+                        help="manual 模式：逗号分隔的币种列表，如 BTC,ETH,DOGE")
+    parser.add_argument("--main", type=str, default="",
+                        help="manual 模式：逗号分隔的主所列表，如 BINANCE")
+    parser.add_argument("--secondary", type=str, default="",
+                        help="manual 模式：逗号分隔的副所列表，如 KRAKEN,GATEIO")
+    parser.add_argument("--require-common-chain", action=argparse.BooleanOptionalAction, default=True,
+                        help="主所与副所需至少有一条共同提现链才保留该币种（默认开启，需要 "
+                             "BINANCE/KRAKEN 私有 API Key；用 --no-require-common-chain 关闭）")
+    parser.add_argument("--dump-chains", action="store_true",
+                        help="仅按已配置的 Key 拉取并打印各所提现链数据，不启动实时监控（调试用）")
+    parser.add_argument("--dump-symbols", type=str, default="",
+                        help="--dump-chains 时可选，逗号分隔币种列表，只打印这些币种（默认打印全部）")
     args = parser.parse_args()
+
+    if args.dump_chains:
+        _dump_chains(args.dump_symbols)
+        return
+
+    known_venues = {str(v["key"]) for v in VENUE_REGISTRY}
+    if args.mode == "manual":
+        if not (args.symbols and args.main and args.secondary):
+            parser.error("--mode manual 需要同时指定 --symbols、--main、--secondary")
+        unknown = (_parse_csv_set(args.main) | _parse_csv_set(args.secondary)) - known_venues
+        if unknown:
+            parser.error(f"未知交易所: {sorted(unknown)}，可选: {sorted(known_venues)}")
 
     venue_fees = parse_fees_arg(args.fees)
     print("[fees] 使用手续费率:")
@@ -516,42 +867,21 @@ def main() -> None:
         print(f"  {v}: {f*100:.4f}%")
     print(f"[fees] 单边滑点: {args.slippage*100:.4f}%")
 
+    chain_support_json = "{}"
+    if args.require_common_chain:
+        if args.mode == "manual":
+            relevant_venues = _parse_csv_set(args.main) | _parse_csv_set(args.secondary)
+        else:
+            relevant_venues = MAIN_SPOT_VENUES | SECONDARY_VENUES
+        chain_support = _load_chain_support(relevant_venues)
+        chain_support_json = json.dumps(
+            {v: {b: sorted(cs) for b, cs in m.items()} for v, m in chain_support.items()},
+        )
+
     config_node = TradingNodeConfig(
         trader_id="SPREAD-MONITOR-001",
-        logging=LoggingConfig(log_level="INFO"),
-        data_clients={
-            # 主所现货
-            BINANCE: BinanceDataClientConfig(
-                environment=BinanceEnvironment.LIVE,
-                account_type=BinanceAccountType.SPOT,
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
-            # 主所永续（Binance 独立 venue key）
-            BINANCE_FUT_KEY: BinanceDataClientConfig(
-                venue=Venue(BINANCE_FUT_KEY),
-                environment=BinanceEnvironment.LIVE,
-                account_type=BinanceAccountType.USDT_FUTURES,
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
-            # 主所现货 + 永续
-            OKX: OKXDataClientConfig(
-                environment=OKXEnvironment.LIVE,
-                instrument_types=frozenset({OKXInstrumentType.SPOT, OKXInstrumentType.SWAP}),
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
-            # 副所现货
-            KRAKEN: KrakenDataClientConfig(
-                environment=KrakenEnvironment.LIVE,
-                product_types=(KrakenProductType.SPOT,),
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
-            GATEIO: GateIoDataClientConfig(
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
-            BITFINEX: BitfinexDataClientConfig(
-                instrument_provider=InstrumentProviderConfig(load_all=True),
-            ),
-        },
+        logging=LoggingConfig(log_level=args.log_level),
+        data_clients={v["key"]: v["config"]() for v in VENUE_REGISTRY},
         strategies=[],
     )
 
@@ -564,16 +894,18 @@ def main() -> None:
             slippage=args.slippage,
             alert_only=args.alert_only,
             venue_fees_json=json.dumps(venue_fees),
+            mode=args.mode,
+            manual_symbols_csv=args.symbols,
+            manual_main_csv=args.main,
+            manual_secondary_csv=args.secondary,
+            require_common_chain=args.require_common_chain,
+            chain_support_json=chain_support_json,
         )
     )
 
     node = TradingNode(config=config_node)
-    node.add_data_client_factory(BINANCE, BinanceLiveDataClientFactory)
-    node.add_data_client_factory(BINANCE_FUT_KEY, BinanceLiveDataClientFactory)
-    node.add_data_client_factory(OKX, OKXLiveDataClientFactory)
-    node.add_data_client_factory(KRAKEN, KrakenLiveDataClientFactory)
-    node.add_data_client_factory(GATEIO, GateIoLiveDataClientFactory)
-    node.add_data_client_factory(BITFINEX, BitfinexLiveDataClientFactory)
+    for v in VENUE_REGISTRY:
+        node.add_data_client_factory(v["key"], v["factory"])
     node.build()
     node.trader.add_strategy(monitor)
     node.run()
