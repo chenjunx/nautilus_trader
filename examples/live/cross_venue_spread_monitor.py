@@ -4,8 +4,9 @@ Cross-venue USDT spot spread monitor - main vs secondary venues.
 监控主所（Binance/Bybit）与副所（Kraken 等）之间的 USDT 现货价差。
 
 筛选规则（--mode auto，默认）:
-  1. 币种在任意主所同时有 USDT 现货 + USDT 永续
-  2. 币种在同一副所同时有 USDT 现货 + USDT 永续（严格同所匹配）
+  1. 币种在任意主所同时有 USDT 现货 + USDT/USD 永续
+  2. 币种在同一副所同时有 USDT 现货 + USDT/USD 永续（严格同所匹配；
+     永续接受 USD 报价，因 Kraken 永续以 USD 结算，无 USDT 永续）
   3. 黑名单币种（BTC/ETH/SOL/XRP/BNB）直接排除
 
 筛选规则（--mode manual）:
@@ -56,6 +57,7 @@ from nautilus_trader.adapters.binance import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.adapters.gateio import GATEIO
+from nautilus_trader.adapters.gateio import GateIoAccountType
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
 from nautilus_trader.adapters.gateio import GateIoLiveDataClientFactory
 from nautilus_trader.adapters.kraken import KRAKEN
@@ -76,9 +78,14 @@ from nautilus_trader.trading.strategy import Strategy
 
 # Binance futures 使用独立 venue key，便于与现货区分
 BINANCE_FUT_KEY = "BINANCE_FUT"
+# Gate.io 现货/永续实际都打的是同一个 venue（GATEIO），这里只是为了 data_clients 字典 key 不冲突
+GATEIO_FUT_KEY = "GATEIO_FUT"
 
 # 交易所配置总表：新增/删除一个所，只需在此增删一条记录。
-# roles: "main_spot" | "main_perp" | "secondary"
+# roles: "main_spot" | "main_perp" | "secondary" | "secondary_perp"
+# instrument_venue: 该 client 加载出来的 instrument 实际挂的 venue（默认等于 key）。
+# Binance 永续通过 venue= 参数覆盖，key 与实际 venue 一致；Gate.io 现货/永续无此覆盖能力，
+# 实际 venue 恒为 GATEIO，因此永续条目需要显式声明 instrument_venue=GATEIO。
 VENUE_REGISTRY: list[dict] = [
     {
         "key": BINANCE,
@@ -123,16 +130,30 @@ VENUE_REGISTRY: list[dict] = [
         "factory": GateIoLiveDataClientFactory,
         "default_fee": 0.00080,
     },
+    {
+        "key": GATEIO_FUT_KEY,
+        "roles": {"secondary_perp"},
+        "instrument_venue": GATEIO,
+        "config": lambda: GateIoDataClientConfig(
+            account_type=GateIoAccountType.LINEAR,
+            settle="usdt",
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": GateIoLiveDataClientFactory,
+        "default_fee": None,
+    },
 ]
 
 # 主所（有永续 + 现货）
-MAIN_SPOT_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "main_spot" in v["roles"]}
-MAIN_PERP_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "main_perp" in v["roles"]}
+MAIN_SPOT_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "main_spot" in v["roles"]}
+MAIN_PERP_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "main_perp" in v["roles"]}
 
 # 副所（现货）
-SECONDARY_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "secondary" in v["roles"]}
+SECONDARY_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "secondary" in v["roles"]}
 # 副所（永续，用于要求"副所同一所同时有现货+永续"）
-SECONDARY_PERP_VENUES = {str(v["key"]) for v in VENUE_REGISTRY if "secondary_perp" in v["roles"]}
+SECONDARY_PERP_VENUES = {
+    str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "secondary_perp" in v["roles"]
+}
 
 # 黑名单：流动性过高，套利竞争激烈
 BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
@@ -420,18 +441,23 @@ class SpreadMonitor(Strategy):
             except AttributeError:
                 continue
 
-            if quote != "USDT" or base in BLACKLIST:
+            if base in BLACKLIST:
                 continue
 
             venue = str(inst.id.venue)
 
             if isinstance(inst, CurrencyPair):
+                if quote != "USDT":
+                    continue
                 if venue in MAIN_SPOT_VENUES:
                     main_spot[base][venue] = inst
                 elif venue in SECONDARY_VENUES:
                     secondary_spot[base][venue] = inst
 
             elif isinstance(inst, CryptoPerpetual):
+                # Kraken 永续以 USD 结算/报价（无 USDT 永续），语义上等价于 USDT 永续，一并接受
+                if quote not in ("USDT", "USD"):
+                    continue
                 if venue in MAIN_PERP_VENUES:
                     main_perp[base].add(venue)
                 elif venue in SECONDARY_PERP_VENUES:
