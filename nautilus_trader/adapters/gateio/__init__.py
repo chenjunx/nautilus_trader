@@ -13,17 +13,21 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-"""Gate.io adapter for nautilus_trader — data-only (spot and USDT-margined linear futures)."""
+"""Gate.io adapter for nautilus_trader — spot and USDT-margined linear futures, data and execution."""
 
 from nautilus_trader.adapters.gateio.common.constants import GATEIO
 from nautilus_trader.adapters.gateio.common.constants import GATEIO_CLIENT_ID
 from nautilus_trader.adapters.gateio.common.constants import GATEIO_VENUE
 from nautilus_trader.adapters.gateio.common.enums import GateIoAccountType
 from nautilus_trader.adapters.gateio.config import GateIoDataClientConfig
+from nautilus_trader.adapters.gateio.config import GateIoExecClientConfig
 from nautilus_trader.adapters.gateio.factories import GateIoLiveDataClientFactory
+from nautilus_trader.adapters.gateio.factories import GateIoLiveExecClientFactory
 from nautilus_trader.adapters.gateio.futures.data import GateIoFuturesDataClient
+from nautilus_trader.adapters.gateio.futures.execution import GateIoFuturesExecutionClient
 from nautilus_trader.adapters.gateio.futures.providers import GateIoFuturesInstrumentProvider
 from nautilus_trader.adapters.gateio.spot.data import GateIoSpotDataClient
+from nautilus_trader.adapters.gateio.spot.execution import GateIoSpotExecutionClient
 from nautilus_trader.adapters.gateio.spot.providers import GateIoSpotInstrumentProvider
 
 
@@ -33,9 +37,13 @@ __all__ = [
     "GATEIO_VENUE",
     "GateIoAccountType",
     "GateIoDataClientConfig",
+    "GateIoExecClientConfig",
     "GateIoFuturesDataClient",
+    "GateIoFuturesExecutionClient",
     "GateIoFuturesInstrumentProvider",
     "GateIoLiveDataClientFactory",
+    "GateIoLiveExecClientFactory",
     "GateIoSpotDataClient",
+    "GateIoSpotExecutionClient",
     "GateIoSpotInstrumentProvider",
 ]

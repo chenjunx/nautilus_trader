@@ -57,6 +57,12 @@ class GateIoFuturesWsMessage(msgspec.Struct, omit_defaults=True):
     and ticker update objects decode without error. The ticker payload is
     converted to GateIoFuturesBookTickerResult via msgspec.convert() only
     when event == "update".
+
+    futures.orders/futures.usertrades/futures.positions push payloads reuse
+    the REST GateIoFuturesOrder/GateIoFuturesTrade/GateIoFuturesPosition
+    structs directly (msgspec ignores unknown JSON fields), since Gate.io
+    documents these push payloads as sharing the same shape as the REST
+    objects.
     """
 
     time: int

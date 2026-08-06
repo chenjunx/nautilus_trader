@@ -50,6 +50,27 @@ class GateIoBookTickerResult(msgspec.Struct, omit_defaults=True):
     u: int | None = None
 
 
+class GateIoWsSpotBalance(msgspec.Struct, omit_defaults=True):
+    """
+    Gate.io spot.balances push result item.
+
+    Order/trade push messages reuse the REST `GateIoOrder`/`GateIoTrade` structs
+    directly (msgspec ignores unknown JSON fields), since Gate.io documents the
+    push payload as sharing the same shape as the REST order/trade object. The
+    balances push uses a distinct field set (`change`/`total`/`available`
+    rather than `available`/`locked`), so it gets its own struct here.
+
+    """
+
+    timestamp: str | None = None
+    timestamp_ms: str | None = None
+    user: str | None = None
+    currency: str = ""
+    change: str = "0"
+    total: str = "0"
+    available: str = "0"
+
+
 class GateIoWsMessage(msgspec.Struct, omit_defaults=True):
     """Top-level Gate.io WebSocket frame.
 

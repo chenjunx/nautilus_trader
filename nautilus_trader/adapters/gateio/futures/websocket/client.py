@@ -20,6 +20,7 @@ from collections.abc import Callable
 
 import msgspec
 
+from nautilus_trader.adapters.gateio.common.signing import gateio_ws_channel_auth
 from nautilus_trader.common.component import Logger
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core.nautilus_pyo3 import WebSocketClient
@@ -41,6 +42,10 @@ class GateIoFuturesWebSocketClient:
         The callback handler for incoming messages.
     handler_reconnect : Callable[[], Awaitable[None]], optional
         Called after each reconnection to re-subscribe.
+    api_key : str, optional
+        The Gate.io API key. Required for private channel subscriptions.
+    api_secret : str, optional
+        The Gate.io API secret. Required for private channel subscriptions.
 
     """
 
@@ -50,12 +55,16 @@ class GateIoFuturesWebSocketClient:
         url: str,
         handler: Callable[[bytes], None],
         handler_reconnect: Callable[[], Awaitable[None]] | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
     ) -> None:
         self._log: Logger = Logger(type(self).__name__)
         self._loop = loop
         self._url = url
         self._handler = handler
         self._handler_reconnect = handler_reconnect
+        self._api_key = api_key
+        self._api_secret = api_secret
         self._client: WebSocketClient | None = None
 
     @property
@@ -132,3 +141,37 @@ class GateIoFuturesWebSocketClient:
             "payload": symbols,
         })
         self._log.debug(f"Unsubscribed futures.book_ticker: {symbols}")
+
+    async def _subscribe_private(self, channel: str, payload: list[str]) -> None:
+        if not self._api_key or not self._api_secret:
+            raise RuntimeError(
+                "Gate.io API key/secret not configured for private channel subscription",
+            )
+        timestamp = int(time.time())
+        auth = gateio_ws_channel_auth(
+            channel=channel,
+            event="subscribe",
+            timestamp=str(timestamp),
+            api_key=self._api_key,
+            api_secret=self._api_secret,
+        )
+        await self._send({
+            "time": timestamp,
+            "channel": channel,
+            "event": "subscribe",
+            "payload": payload,
+            "auth": auth,
+        })
+        self._log.debug(f"Subscribed {channel}: {payload}")
+
+    async def subscribe_orders(self, user_id: str, contracts: list[str] | None = None) -> None:
+        """Subscribe to futures.orders for the given user/contracts (all contracts if None)."""
+        await self._subscribe_private("futures.orders", [user_id, *(contracts or ["!all"])])
+
+    async def subscribe_usertrades(self, user_id: str, contracts: list[str] | None = None) -> None:
+        """Subscribe to futures.usertrades for the given user/contracts (all contracts if None)."""
+        await self._subscribe_private("futures.usertrades", [user_id, *(contracts or ["!all"])])
+
+    async def subscribe_positions(self, user_id: str, contracts: list[str] | None = None) -> None:
+        """Subscribe to futures.positions for the given user/contracts (all contracts if None)."""
+        await self._subscribe_private("futures.positions", [user_id, *(contracts or ["!all"])])

@@ -33,6 +33,11 @@ from nautilus_trader.adapters.kraken.data import KrakenDataClient
 from nautilus_trader.adapters.kraken.execution import KrakenExecutionClient
 from nautilus_trader.adapters.kraken.factories import KrakenLiveDataClientFactory
 from nautilus_trader.adapters.kraken.factories import KrakenLiveExecClientFactory
+from nautilus_trader.adapters.kraken.http.wallet import fetch_kraken_deposit_addresses
+from nautilus_trader.adapters.kraken.http.wallet import fetch_kraken_deposit_methods
+from nautilus_trader.adapters.kraken.http.wallet import fetch_kraken_deposit_status
+from nautilus_trader.adapters.kraken.http.wallet import fetch_kraken_trade_fees
+from nautilus_trader.adapters.kraken.http.wallet import fetch_kraken_withdraw_methods
 from nautilus_trader.adapters.kraken.providers import KrakenInstrumentProvider
 from nautilus_trader.adapters.kraken.types import KRAKEN_INSTRUMENT_TYPES
 from nautilus_trader.adapters.kraken.types import KrakenInstrument
@@ -50,9 +55,14 @@ __all__ = [
     "KrakenEnvironment",
     "KrakenExecClientConfig",
     "KrakenExecutionClient",
-    "KrakenInstrument",
     "KrakenInstrumentProvider",
+    "KrakenInstrument",
     "KrakenLiveDataClientFactory",
     "KrakenLiveExecClientFactory",
     "KrakenProductType",
+    "fetch_kraken_deposit_addresses",
+    "fetch_kraken_deposit_methods",
+    "fetch_kraken_deposit_status",
+    "fetch_kraken_trade_fees",
+    "fetch_kraken_withdraw_methods",
 ]

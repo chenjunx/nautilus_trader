@@ -16,6 +16,8 @@
 from nautilus_trader.adapters.gateio.common.constants import GATEIO_VENUE
 from nautilus_trader.adapters.gateio.common.enums import GateIoAccountType
 from nautilus_trader.config import LiveDataClientConfig
+from nautilus_trader.config import LiveExecClientConfig
+from nautilus_trader.config import PositiveInt
 from nautilus_trader.model.identifiers import Venue
 
 
@@ -46,3 +48,41 @@ class GateIoDataClientConfig(LiveDataClientConfig, frozen=True):
     venue: Venue = GATEIO_VENUE
     base_url_http: str | None = None
     base_url_ws: str | None = None
+
+
+class GateIoExecClientConfig(LiveExecClientConfig, frozen=True):
+    """
+    Configuration for the Gate.io execution client.
+
+    Parameters
+    ----------
+    api_key : str, optional
+        The Gate.io API key. If ``None`` then will source the `GATEIO_API_KEY` env var.
+    api_secret : str, optional
+        The Gate.io API secret. If ``None`` then will source the `GATEIO_API_SECRET` env var.
+    account_type : GateIoAccountType, default GateIoAccountType.SPOT
+        The account/product type for the client (spot or USDT-margined linear futures).
+    settle : str, default 'usdt'
+        The settlement asset for futures contracts. Only consulted when
+        `account_type` is `GateIoAccountType.LINEAR`.
+    venue : Venue, default GATEIO_VENUE
+        The venue for the client. Override this (together with the client's registered
+        `name`) to run a spot and a futures Gate.io client side by side in the same
+        `TradingNode`, since both otherwise resolve to the same `client_id`.
+    base_url_http : str, optional
+        Override the default HTTP base URL.
+    base_url_ws : str, optional
+        Override the default WebSocket URL.
+    ratelimiter_default_quota_per_second : PositiveInt, default 5
+        The default rate limit quota (requests per second) applied to all HTTP requests.
+
+    """
+
+    api_key: str | None = None
+    api_secret: str | None = None
+    account_type: GateIoAccountType = GateIoAccountType.SPOT
+    settle: str = "usdt"
+    venue: Venue = GATEIO_VENUE
+    base_url_http: str | None = None
+    base_url_ws: str | None = None
+    ratelimiter_default_quota_per_second: PositiveInt = 5

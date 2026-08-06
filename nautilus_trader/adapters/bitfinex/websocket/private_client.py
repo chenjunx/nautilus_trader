@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 import msgspec
 
-from nautilus_trader.adapters.gateio.common.signing import gateio_ws_channel_auth
+from nautilus_trader.adapters.bitfinex.common.signing import bitfinex_ws_auth_payload
 from nautilus_trader.common.component import Logger
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core.nautilus_pyo3 import WebSocketClient
@@ -28,24 +28,28 @@ from nautilus_trader.core.nautilus_pyo3 import WebSocketClientError
 from nautilus_trader.core.nautilus_pyo3 import WebSocketConfig
 
 
-class GateIoSpotWebSocketClient:
+class BitfinexPrivateWebSocketClient:
     """
-    Provides a Gate.io spot streaming WebSocket client.
+    Provides a Bitfinex authenticated streaming WebSocket client.
+
+    Unlike the public channel client, authentication happens once for the whole socket
+    (via an ``auth`` event sent immediately after connecting); order, wallet, trade, and
+    position updates are then pushed automatically without any per-channel subscription.
 
     Parameters
     ----------
     loop : asyncio.AbstractEventLoop
         The event loop for the client.
     url : str
-        The WebSocket server URL.
+        The authenticated WebSocket server URL.
+    api_key : str
+        The Bitfinex API key.
+    api_secret : str
+        The Bitfinex API secret.
     handler : Callable[[bytes], None]
         The callback handler for incoming messages.
     handler_reconnect : Callable[[], Awaitable[None]], optional
-        Called after each reconnection to re-subscribe.
-    api_key : str, optional
-        The Gate.io API key. Required for private channel subscriptions.
-    api_secret : str, optional
-        The Gate.io API secret. Required for private channel subscriptions.
+        Called after each reconnection (after re-authenticating) to reconcile state.
 
     """
 
@@ -53,26 +57,27 @@ class GateIoSpotWebSocketClient:
         self,
         loop: asyncio.AbstractEventLoop,
         url: str,
+        api_key: str,
+        api_secret: str,
         handler: Callable[[bytes], None],
         handler_reconnect: Callable[[], Awaitable[None]] | None = None,
-        api_key: str | None = None,
-        api_secret: str | None = None,
     ) -> None:
         self._log: Logger = Logger(type(self).__name__)
         self._loop = loop
         self._url = url
-        self._handler = handler
-        self._handler_reconnect = handler_reconnect
         self._api_key = api_key
         self._api_secret = api_secret
+        self._handler = handler
+        self._handler_reconnect = handler_reconnect
         self._client: WebSocketClient | None = None
 
     @property
     def is_connected(self) -> bool:
+        """Return whether the WebSocket connection is active."""
         return self._client is not None and not self._client.is_closed()
 
     async def connect(self) -> None:
-        """Connect to the Gate.io WebSocket server."""
+        """Connect to the Bitfinex authenticated WebSocket server and authenticate."""
         self._log.info(f"Connecting to {self._url}...", LogColor.BLUE)
         config = WebSocketConfig(
             url=self._url,
@@ -87,11 +92,21 @@ class GateIoSpotWebSocketClient:
             post_reconnection=self._handle_reconnect,
         )
         self._log.info(f"Connected to {self._url}", LogColor.BLUE)
+        await self._authenticate()
+
+    async def _authenticate(self) -> None:
+        nonce = str(time.time_ns() // 1_000)
+        await self._send(bitfinex_ws_auth_payload(nonce, self._api_key, self._api_secret))
+        self._log.debug("Sent auth event")
 
     def _handle_reconnect(self) -> None:
+        task = self._loop.create_task(self._reconnect_and_notify())
+        task.add_done_callback(self._on_task_done)
+
+    async def _reconnect_and_notify(self) -> None:
+        await self._authenticate()
         if self._handler_reconnect is not None:
-            task = self._loop.create_task(self._handler_reconnect())
-            task.add_done_callback(self._on_task_done)
+            await self._handler_reconnect()
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -101,7 +116,7 @@ class GateIoSpotWebSocketClient:
             self._log.warning(f"Reconnect handler error: {exc!r}")
 
     async def disconnect(self) -> None:
-        """Disconnect from the server."""
+        """Disconnect from the Bitfinex WebSocket server."""
         if self._client is None:
             return
         if self._client.is_disconnecting() or self._client.is_closed():
@@ -121,57 +136,3 @@ class GateIoSpotWebSocketClient:
             await self._client.send_text(msgspec.json.encode(payload))
         except WebSocketClientError as e:
             self._log.warning(f"WebSocket send error: {e!s}")
-
-    async def subscribe_book_ticker(self, symbols: list[str]) -> None:
-        """Subscribe to spot.book_ticker for the given symbols."""
-        await self._send({
-            "time": int(time.time()),
-            "channel": "spot.book_ticker",
-            "event": "subscribe",
-            "payload": symbols,
-        })
-        self._log.debug(f"Subscribed spot.book_ticker: {symbols}")
-
-    async def unsubscribe_book_ticker(self, symbols: list[str]) -> None:
-        """Unsubscribe from spot.book_ticker for the given symbols."""
-        await self._send({
-            "time": int(time.time()),
-            "channel": "spot.book_ticker",
-            "event": "unsubscribe",
-            "payload": symbols,
-        })
-        self._log.debug(f"Unsubscribed spot.book_ticker: {symbols}")
-
-    async def _subscribe_private(self, channel: str, payload: list[str]) -> None:
-        if not self._api_key or not self._api_secret:
-            raise RuntimeError(
-                "Gate.io API key/secret not configured for private channel subscription",
-            )
-        timestamp = int(time.time())
-        auth = gateio_ws_channel_auth(
-            channel=channel,
-            event="subscribe",
-            timestamp=str(timestamp),
-            api_key=self._api_key,
-            api_secret=self._api_secret,
-        )
-        await self._send({
-            "time": timestamp,
-            "channel": channel,
-            "event": "subscribe",
-            "payload": payload,
-            "auth": auth,
-        })
-        self._log.debug(f"Subscribed {channel}: {payload}")
-
-    async def subscribe_orders(self, symbols: list[str] | None = None) -> None:
-        """Subscribe to spot.orders for the given currency pairs (all pairs if None)."""
-        await self._subscribe_private("spot.orders", symbols or ["!all"])
-
-    async def subscribe_usertrades(self, symbols: list[str] | None = None) -> None:
-        """Subscribe to spot.usertrades for the given currency pairs (all pairs if None)."""
-        await self._subscribe_private("spot.usertrades", symbols or ["!all"])
-
-    async def subscribe_balances(self) -> None:
-        """Subscribe to spot.balances for the authenticated account."""
-        await self._subscribe_private("spot.balances", [])

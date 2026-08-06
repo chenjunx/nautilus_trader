@@ -71,6 +71,7 @@ class BitfinexDataClient(LiveMarketDataClient):
             http_client=self._http_client,
             clock=clock,
             config=config.instrument_provider,
+            instrument_types=config.instrument_types,
         )
 
         super().__init__(

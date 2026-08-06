@@ -16,11 +16,14 @@
 import asyncio
 
 from nautilus_trader.adapters.bitfinex.config import BitfinexDataClientConfig
+from nautilus_trader.adapters.bitfinex.config import BitfinexExecClientConfig
 from nautilus_trader.adapters.bitfinex.data import BitfinexDataClient
+from nautilus_trader.adapters.bitfinex.execution import BitfinexExecutionClient
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.live.factories import LiveDataClientFactory
+from nautilus_trader.live.factories import LiveExecClientFactory
 
 
 class BitfinexLiveDataClientFactory(LiveDataClientFactory):
@@ -41,4 +44,26 @@ class BitfinexLiveDataClientFactory(LiveDataClientFactory):
             cache=cache,
             clock=clock,
             config=config,
+        )
+
+
+class BitfinexLiveExecClientFactory(LiveExecClientFactory):
+    """Provides a Bitfinex live execution client factory."""
+
+    @staticmethod
+    def create(  # type: ignore
+        loop: asyncio.AbstractEventLoop,
+        name: str | None,
+        config: BitfinexExecClientConfig,
+        msgbus: MessageBus,
+        cache: Cache,
+        clock: LiveClock,
+    ) -> BitfinexExecutionClient:
+        return BitfinexExecutionClient(
+            loop=loop,
+            msgbus=msgbus,
+            cache=cache,
+            clock=clock,
+            config=config,
+            name=name,
         )

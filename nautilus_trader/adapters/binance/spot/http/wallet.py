@@ -132,3 +132,108 @@ class BinanceSpotWalletHttpAPI:
             ),
         )
         return fees
+
+
+# ==============================================================================
+# 钱包管理（提现/充值）同步函数 - 供策略层直接调用
+# ==============================================================================
+
+import hashlib
+import hmac
+import time
+import urllib.parse
+
+import httpx
+
+
+def _binance_sign_query(query: str, secret: str) -> str:
+    """Binance 签名接口通用的 HMAC-SHA256 query 签名。"""
+    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+
+
+def fetch_binance_withdraw_chain_details(api_key: str, api_secret: str) -> dict[str, dict[str, dict]]:
+    """拉取 Binance 每个币种的提现网络明细（含手续费/最小提现量/是否开放提现）。
+
+    GET /sapi/v1/capital/config/getall（签名接口）。
+
+    返回 {base: {链名: {"fee": float, "min": float, "enabled": bool}}}。
+    链名归一化由调用方自行处理（保持框架层职责单一）。
+    """
+    ts = int(time.time() * 1000)
+    query = f"timestamp={ts}"
+    sig = _binance_sign_query(query, api_secret)
+    url = f"https://api.binance.com/sapi/v1/capital/config/getall?{query}&signature={sig}"
+    resp = httpx.get(url, headers={"X-MBX-APIKEY": api_key}, timeout=10.0)
+    resp.raise_for_status()
+
+    result: dict[str, dict[str, dict]] = {}
+    for coin in resp.json():
+        base = str(coin.get("coin", "")).upper()
+        networks: dict[str, dict] = {}
+        for n in coin.get("networkList", []):
+            network = str(n.get("network", ""))
+            if not network:
+                continue
+            networks[network] = {
+                "fee": float(n.get("withdrawFee", 0.0) or 0.0),
+                "min": float(n.get("withdrawMin", 0.0) or 0.0),
+                "enabled": bool(n.get("withdrawEnable", False)),
+            }
+        if base and networks:
+            result[base] = networks
+    return result
+
+
+def binance_withdraw(
+    api_key: str,
+    api_secret: str,
+    coin: str,
+    network: str,
+    address: str,
+    amount: float,
+    address_tag: str | None = None,
+) -> str:
+    """提交 Binance 提现申请，返回 withdrawal id。
+
+    POST /sapi/v1/capital/withdraw/apply（签名接口）。
+
+    调用方必须把这里抛出的任何异常（超时/网络错误/HTTP 错误）都当作"提现结果未知"
+    而不是"提现失败"处理——绝不能因为这里出错就自动重发一次提现，必须先人工核实
+    交易所网页端是否已经提交成功，否则有双花风险。
+    """
+    params = {
+        "coin": coin.upper(),
+        "network": network,
+        "address": address,
+        "amount": str(amount),
+        "timestamp": str(int(time.time() * 1000)),
+    }
+    if address_tag:
+        params["addressTag"] = address_tag
+
+    query = urllib.parse.urlencode(params)
+    sig = _binance_sign_query(query, api_secret)
+    url = f"https://api.binance.com/sapi/v1/capital/withdraw/apply?{query}&signature={sig}"
+    resp = httpx.post(url, headers={"X-MBX-APIKEY": api_key}, timeout=10.0)
+    resp.raise_for_status()
+    body = resp.json()
+    return str(body["id"])
+
+
+def binance_withdraw_status(api_key: str, api_secret: str, coin: str, withdrawal_id: str) -> dict | None:
+    """查询指定提现单的状态。
+
+    GET /sapi/v1/capital/withdraw/history（签名接口）。
+
+    返回该提现单的详情，找不到时返回 None。
+    """
+    params = {"coin": coin.upper(), "timestamp": str(int(time.time() * 1000))}
+    query = urllib.parse.urlencode(params)
+    sig = _binance_sign_query(query, api_secret)
+    url = f"https://api.binance.com/sapi/v1/capital/withdraw/history?{query}&signature={sig}"
+    resp = httpx.get(url, headers={"X-MBX-APIKEY": api_key}, timeout=10.0)
+    resp.raise_for_status()
+    for row in resp.json():
+        if str(row.get("id")) == str(withdrawal_id):
+            return row
+    return None

@@ -12,26 +12,3 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-
-from enum import Enum
-
-from nautilus_trader.model.identifiers import ClientId
-from nautilus_trader.model.identifiers import Venue
-
-
-BITFINEX = "BITFINEX"
-BITFINEX_VENUE = Venue("BITFINEX")
-BITFINEX_CLIENT_ID = ClientId("BITFINEX")
-
-BITFINEX_HTTP_BASE_URL = "https://api-pub.bitfinex.com/v2"
-BITFINEX_WS_BASE_URL = "wss://api-pub.bitfinex.com/ws/2"
-
-BITFINEX_HTTP_AUTH_BASE_URL = "https://api.bitfinex.com/v2"
-BITFINEX_WS_AUTH_BASE_URL = "wss://api.bitfinex.com/ws/2"
-
-
-class BitfinexInstrumentType(Enum):
-    """Instrument types supported by the Bitfinex data client."""
-
-    SPOT = "SPOT"
-    PERPETUAL = "PERPETUAL"

@@ -13,14 +13,18 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-"""Bitfinex adapter for nautilus_trader — data-only (spot market data)."""
+"""Bitfinex adapter for nautilus_trader — spot and USDT perpetual futures, data and execution."""
 
 from nautilus_trader.adapters.bitfinex.config import BitfinexDataClientConfig
+from nautilus_trader.adapters.bitfinex.config import BitfinexExecClientConfig
 from nautilus_trader.adapters.bitfinex.constants import BITFINEX
 from nautilus_trader.adapters.bitfinex.constants import BITFINEX_CLIENT_ID
 from nautilus_trader.adapters.bitfinex.constants import BITFINEX_VENUE
+from nautilus_trader.adapters.bitfinex.constants import BitfinexInstrumentType
 from nautilus_trader.adapters.bitfinex.data import BitfinexDataClient
+from nautilus_trader.adapters.bitfinex.execution import BitfinexExecutionClient
 from nautilus_trader.adapters.bitfinex.factories import BitfinexLiveDataClientFactory
+from nautilus_trader.adapters.bitfinex.factories import BitfinexLiveExecClientFactory
 from nautilus_trader.adapters.bitfinex.providers import BitfinexInstrumentProvider
 
 
@@ -30,6 +34,10 @@ __all__ = [
     "BITFINEX_VENUE",
     "BitfinexDataClient",
     "BitfinexDataClientConfig",
+    "BitfinexExecClientConfig",
+    "BitfinexExecutionClient",
     "BitfinexInstrumentProvider",
+    "BitfinexInstrumentType",
     "BitfinexLiveDataClientFactory",
+    "BitfinexLiveExecClientFactory",
 ]

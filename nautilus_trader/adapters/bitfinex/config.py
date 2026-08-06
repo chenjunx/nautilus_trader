@@ -13,7 +13,10 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from nautilus_trader.adapters.bitfinex.constants import BitfinexInstrumentType
 from nautilus_trader.config import LiveDataClientConfig
+from nautilus_trader.config import LiveExecClientConfig
+from nautilus_trader.config import PositiveInt
 
 
 class BitfinexDataClientConfig(LiveDataClientConfig, frozen=True):
@@ -26,8 +29,44 @@ class BitfinexDataClientConfig(LiveDataClientConfig, frozen=True):
         Override the default HTTP base URL.
     base_url_ws : str, optional
         Override the default WebSocket URL.
+    instrument_types : tuple[BitfinexInstrumentType, ...], default (BitfinexInstrumentType.SPOT,)
+        The instrument types to load and subscribe. Include `BitfinexInstrumentType.PERPETUAL`
+        to also load USDT-margined perpetual futures.
 
     """
 
     base_url_http: str | None = None
     base_url_ws: str | None = None
+    instrument_types: tuple[BitfinexInstrumentType, ...] = (BitfinexInstrumentType.SPOT,)
+
+
+class BitfinexExecClientConfig(LiveExecClientConfig, frozen=True):
+    """
+    Configuration for the Bitfinex execution client.
+
+    Parameters
+    ----------
+    api_key : str, optional
+        The Bitfinex API key. If ``None`` then will source the `BITFINEX_API_KEY` env var.
+    api_secret : str, optional
+        The Bitfinex API secret. If ``None`` then will source the `BITFINEX_API_SECRET` env var.
+    instrument_types : tuple[BitfinexInstrumentType, ...], default (SPOT, PERPETUAL)
+        The instrument types to load and trade.
+    base_url_http : str, optional
+        Override the default authenticated HTTP base URL.
+    base_url_ws : str, optional
+        Override the default authenticated WebSocket URL.
+    ratelimiter_default_quota_per_second : PositiveInt, default 10
+        The default rate limit quota (requests per second) applied to all HTTP requests.
+
+    """
+
+    api_key: str | None = None
+    api_secret: str | None = None
+    instrument_types: tuple[BitfinexInstrumentType, ...] = (
+        BitfinexInstrumentType.SPOT,
+        BitfinexInstrumentType.PERPETUAL,
+    )
+    base_url_http: str | None = None
+    base_url_ws: str | None = None
+    ratelimiter_default_quota_per_second: PositiveInt = 10
