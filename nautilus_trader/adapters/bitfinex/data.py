@@ -179,7 +179,10 @@ class BitfinexDataClient(LiveMarketDataClient):
                 self._log.debug(f"Channel removed: chanId={msg.chanId}")
 
         elif msg.event == "error":
-            self._log.error(f"Bitfinex WS error code={msg.code}: {msg.msg}")
+            self._log.error(
+                f"Bitfinex WS error code={msg.code}: {msg.msg} "
+                f"(symbol={msg.symbol}, pair={msg.pair})"
+            )
 
     def _handle_data_message(self, raw: bytes) -> None:
         try:
