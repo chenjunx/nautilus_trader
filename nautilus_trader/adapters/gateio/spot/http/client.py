@@ -35,6 +35,14 @@ from nautilus_trader.core.nautilus_pyo3 import Quota
 
 DEFAULT_QUOTA = Quota.rate_per_second(5)
 
+_HTTP_METHOD_NAMES: dict[HttpMethod, str] = {
+    HttpMethod.GET: "GET",
+    HttpMethod.POST: "POST",
+    HttpMethod.PUT: "PUT",
+    HttpMethod.DELETE: "DELETE",
+    HttpMethod.PATCH: "PATCH",
+}
+
 
 class GateIoSpotHttpClient:
     """
@@ -116,7 +124,7 @@ class GateIoSpotHttpClient:
         headers = dict(self._headers)
         headers.update(
             gateio_rest_signature(
-                method=method.value,
+                method=_HTTP_METHOD_NAMES[method],
                 path=f"/api/v4{path}",
                 query_string=query_string,
                 body=body_str,
