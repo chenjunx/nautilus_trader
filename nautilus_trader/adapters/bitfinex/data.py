@@ -243,4 +243,5 @@ class BitfinexDataClient(LiveMarketDataClient):
                 f"Resubscribing to {len(self._subscribed_symbols)} symbols..."
             )
             for symbol in self._subscribed_symbols:
-                await self._ws_client.subscribe_ticker(symbol)
+                bitfinex_native = nautilus_to_bitfinex_pair(symbol)
+                await self._ws_client.subscribe_ticker(bitfinex_native)
