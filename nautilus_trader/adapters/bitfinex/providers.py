@@ -88,18 +88,6 @@ def nautilus_to_bitfinex_pair(symbol: str) -> str:
     if ":" in symbol:
         base, quote = symbol.split(":", 1)
         return f"{_CURRENCY_REMAP_INV.get(base, base)}:{_CURRENCY_REMAP_INV.get(quote, quote)}"
-    # A remapped canonical name (USDT/USDC/EURT) is 4 chars, so a naive [:3]/[3:]
-    # split misaligns whenever one of these appears as the *base* (e.g.
-    # "USDCUSDT" would wrongly split into "USD"/"CUSDT"). Detect the canonical
-    # name as a whole prefix/suffix first and only fall back to the fixed 3/3
-    # split when neither side needs remapping.
-    for canon, native in _CURRENCY_REMAP_INV.items():
-        if symbol.startswith(canon):
-            quote = symbol[len(canon):]
-            return f"{native}{_CURRENCY_REMAP_INV.get(quote, quote)}"
-        if symbol.endswith(canon):
-            base = symbol[: -len(canon)]
-            return f"{_CURRENCY_REMAP_INV.get(base, base)}{native}"
     base, quote = symbol[:3], symbol[3:]
     return f"{_CURRENCY_REMAP_INV.get(base, base)}{_CURRENCY_REMAP_INV.get(quote, quote)}"
 
