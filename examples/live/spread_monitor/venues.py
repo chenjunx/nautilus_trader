@@ -133,8 +133,8 @@ MAIN_PERP_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGI
 # 副所（只交易现货，不参与开仓/永续对冲）
 SECONDARY_VENUES = {str(v.get("instrument_venue", v["key"])) for v in VENUE_REGISTRY if "secondary" in v["roles"]}
 
-# 黑名单：流动性过高，套利竞争激烈
-BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB"}
+# 黑名单：流动性过高，套利竞争激烈；USDC 是稳定币，不适合作为价差监控的 base
+BLACKLIST = {"BTC", "ETH", "SOL", "XRP", "BNB", "USDC"}
 
 # 各所折扣后 taker 费率默认值
 DEFAULT_FEES: dict[str, float] = {
