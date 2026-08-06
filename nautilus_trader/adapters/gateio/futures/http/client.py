@@ -77,7 +77,7 @@ class GateIoFuturesHttpClient:
         }
         self._client = HttpClient(
             default_quota=default_quota or DEFAULT_QUOTA,
-            keyed_quotas=keyed_quotas,
+            keyed_quotas=keyed_quotas or [],
         )
         self._decoder_contracts = msgspec.json.Decoder(list[GateIoFuturesContract])
         self._decoder_order = msgspec.json.Decoder(GateIoFuturesOrder)

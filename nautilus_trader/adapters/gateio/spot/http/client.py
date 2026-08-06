@@ -76,7 +76,7 @@ class GateIoSpotHttpClient:
         }
         self._client = HttpClient(
             default_quota=default_quota or DEFAULT_QUOTA,
-            keyed_quotas=keyed_quotas,
+            keyed_quotas=keyed_quotas or [],
         )
         self._decoder_pairs = msgspec.json.Decoder(list[GateIoCurrencyPair])
         self._decoder_order = msgspec.json.Decoder(GateIoOrder)
