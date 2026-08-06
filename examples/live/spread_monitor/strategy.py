@@ -126,13 +126,15 @@ class SpreadMonitor(Strategy):
                     continue
                 main_perp[base].add(venue)
 
-        # 筛选：至少一个主所同时有现货+永续；副所现货存在即可纳入，不再要求副所有永续
+        # 筛选：至少一个主所自己同时有现货+永续（同一个所才具备对冲能力）；
+        # 副所现货存在即可纳入，不再要求副所有永续
         qualifying: dict[str, dict] = {}
-        for base in set(main_spot) & set(main_perp):
-            qualifying[base] = {
-                "main_spot": main_spot[base],
-                "secondary_spot": secondary_spot.get(base, {}),
-            }
+        for base in main_spot:
+            if set(main_spot[base]) & main_perp.get(base, set()):
+                qualifying[base] = {
+                    "main_spot": main_spot[base],
+                    "secondary_spot": secondary_spot.get(base, {}),
+                }
 
         return qualifying, MAIN_SPOT_VENUES, SECONDARY_VENUES
 
