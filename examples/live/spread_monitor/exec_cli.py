@@ -46,7 +46,6 @@ def main() -> None:
                         help="链上转账到账超时秒数（默认 3600，只告警不重发）")
     parser.add_argument("--withdrawal-fee-safety-multiple", type=float, default=3.0,
                         help="建仓预期收益需覆盖提现手续费的倍数（默认 3）")
-    parser.add_argument("--slippage", type=float, default=0.0002)
     parser.add_argument("--fees", type=str, default="",
                         help="覆盖手续费，格式: BINANCE=0.00075,KRAKEN=0.0005")
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True,
@@ -109,7 +108,6 @@ def main() -> None:
             withdrawal_poll_interval_secs=args.withdrawal_poll_interval,
             withdrawal_timeout_secs=args.withdrawal_timeout,
             withdrawal_fee_safety_multiple=args.withdrawal_fee_safety_multiple,
-            slippage=args.slippage,
             venue_fees_json=json.dumps(venue_fees),
             dry_run=args.dry_run,
             pause_flag_path=args.pause_flag_path,

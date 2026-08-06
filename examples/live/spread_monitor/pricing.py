@@ -1,19 +1,18 @@
 from collections.abc import Callable
 
 
-def net_edge(bid: float, ask: float, fee_buy: float, fee_sell: float, slippage: float) -> float:
+def net_edge(bid: float, ask: float, fee_buy: float, fee_sell: float) -> float:
     """单边费用模型下的净价差（绝对值，非百分比）。
 
     净价差 = 卖出收益 - 买入成本
-           = bid × (1 - fee_sell - slippage) - ask × (1 + fee_buy + slippage)
+           = bid × (1 - fee_sell) - ask × (1 + fee_buy)
     """
-    return bid * (1 - fee_sell - slippage) - ask * (1 + fee_buy + slippage)
+    return bid * (1 - fee_sell) - ask * (1 + fee_buy)
 
 
 def best_pair_arb(
     venue_data: dict[str, tuple[float, float]],
     fee_of: Callable[[str], float],
-    slippage: float,
     excluded_pairs: frozenset[frozenset[str]] = frozenset(),
 ) -> tuple | None:
     """在给定的 {venue: (bid, ask)} 数据里找净价差最优的 (buy_venue, sell_venue) 配对。
@@ -47,7 +46,7 @@ def best_pair_arb(
             fee_b = fee_of(buy_v)
             fee_s = fee_of(sell_v)
 
-            net = net_edge(bid, ask, fee_b, fee_s, slippage)
+            net = net_edge(bid, ask, fee_b, fee_s)
             if net > best_net:
                 best_net = net
                 gross_pct = (bid - ask) / mid * 100

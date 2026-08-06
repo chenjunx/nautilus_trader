@@ -28,8 +28,6 @@ def main() -> None:
                         help="汇总排名打印间隔秒数（默认 30）")
     parser.add_argument("--fees", type=str, default="",
                         help="覆盖手续费，格式: BINANCE=0.00075,KRAKEN=0.0005（默认各所折扣后费率）")
-    parser.add_argument("--slippage", type=float, default=0.0002,
-                        help="单边滑点估算（默认 0.0002 = 0.02%%）")
     parser.add_argument("--alert-only", action="store_true",
                         help="只在 net>0 时输出，适合后台运行")
     parser.add_argument("--mode", choices=["auto", "manual"], default="auto",
@@ -65,7 +63,6 @@ def main() -> None:
     print("[fees] 使用手续费率:")
     for v, f in venue_fees.items():
         print(f"  {v}: {f*100:.4f}%")
-    print(f"[fees] 单边滑点: {args.slippage*100:.4f}%")
 
     chain_support_json = "{}"
     if args.require_common_chain:
@@ -91,7 +88,6 @@ def main() -> None:
             min_net_spread_pct=args.min_net,
             throttle_secs=args.throttle,
             summary_interval=args.summary,
-            slippage=args.slippage,
             alert_only=args.alert_only,
             venue_fees_json=json.dumps(venue_fees),
             mode=args.mode,

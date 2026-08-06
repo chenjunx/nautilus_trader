@@ -66,7 +66,6 @@ class ArbExecutionConfig(StrategyConfig, frozen=True):
     withdrawal_poll_interval_secs: float = 30.0
     withdrawal_timeout_secs: float = 3600.0
     withdrawal_fee_safety_multiple: float = 3.0
-    slippage: float = 0.0002
     venue_fees_json: str = "{}"
     dry_run: bool = True
     pause_flag_path: str = "ARB_PAUSED"
@@ -270,7 +269,7 @@ class ArbExecutionStrategy(Strategy):
                 self.log.debug(f"[exec] {base} 建仓被风控拦截: {reason}")
                 return
 
-        result = best_pair_arb(venue_data, fee_of=lambda v: self._fee_of(base, v), slippage=self.config.slippage)
+        result = best_pair_arb(venue_data, fee_of=lambda v: self._fee_of(base, v))
         if result is None:
             return
         _gross_pct, net_pct, buy_v, buy_ask, _fee_b, _sell_v, sell_bid, _fee_s = result
@@ -590,7 +589,7 @@ class ArbExecutionStrategy(Strategy):
         if is_paused(self.config.pause_flag_path):
             return
 
-        result = best_pair_arb(venue_data, fee_of=lambda v: self._fee_of(base, v), slippage=self.config.slippage)
+        result = best_pair_arb(venue_data, fee_of=lambda v: self._fee_of(base, v))
         if result is None:
             return
         _gross_pct, net_pct, buy_v, buy_ask, _fee_b, sell_v, sell_bid, _fee_s = result
