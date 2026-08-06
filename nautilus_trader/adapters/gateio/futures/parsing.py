@@ -197,8 +197,8 @@ def parse_futures_fill_report(
     return FillReport(
         account_id=account_id,
         instrument_id=instrument_id,
-        venue_order_id=VenueOrderId(trade.order_id),
-        trade_id=TradeId(trade.id),
+        venue_order_id=VenueOrderId(str(trade.order_id)),
+        trade_id=TradeId(str(trade.id)),
         order_side=order_side,
         last_qty=Quantity(abs(trade.size), 0),
         last_px=Price(Decimal(trade.price), price_precision),

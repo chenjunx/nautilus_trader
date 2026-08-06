@@ -723,7 +723,7 @@ class GateIoFuturesExecutionClient(LiveExecutionClient):
             if instrument is None:
                 continue
             client_order_id = self._resolve_client_order_id(
-                VenueOrderId(trade.order_id),
+                VenueOrderId(str(trade.order_id)),
                 trade.text,
             )
             reports.append(
@@ -863,7 +863,7 @@ class GateIoFuturesExecutionClient(LiveExecutionClient):
             self.create_task(self._update_account_state(), log_msg="update_account_state")
 
     def _process_trade_update(self, trade: GateIoFuturesTrade) -> None:
-        venue_order_id = VenueOrderId(trade.order_id)
+        venue_order_id = VenueOrderId(str(trade.order_id))
         client_order_id = self._resolve_client_order_id(venue_order_id, trade.text)
 
         instrument_id = InstrumentId(Symbol(trade.contract), self.venue)
@@ -896,7 +896,7 @@ class GateIoFuturesExecutionClient(LiveExecutionClient):
             client_order_id=client_order_id,
             venue_order_id=venue_order_id,
             venue_position_id=None,
-            trade_id=TradeId(trade.id),
+            trade_id=TradeId(str(trade.id)),
             order_side=order_side,
             order_type=order.order_type,
             last_qty=Quantity(abs(trade.size), 0),

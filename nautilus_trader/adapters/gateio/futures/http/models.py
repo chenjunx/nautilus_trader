@@ -57,8 +57,8 @@ class GateIoFuturesOrder(msgspec.Struct, omit_defaults=True):
 class GateIoFuturesTrade(msgspec.Struct, omit_defaults=True):
     """Gate.io futures trade fill, from GET /futures/{settle}/my_trades (and futures.usertrades push)."""
 
-    id: str
-    order_id: str = ""
+    id: int
+    order_id: int = 0
     contract: str = ""
     size: int = 0                # signed contracts
     price: str = "0"
