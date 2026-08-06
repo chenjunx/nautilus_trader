@@ -15,6 +15,7 @@
 
 import asyncio
 import itertools
+from decimal import Decimal
 
 import msgspec
 
@@ -73,7 +74,6 @@ from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Currency
-from nautilus_trader.model.objects import Decimal
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
