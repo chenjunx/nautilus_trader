@@ -79,7 +79,7 @@ VENUE_REGISTRY: list[dict] = [
         # Bitfinex 现货与 USDT 永续共用同一个 client/venue key（不像 Binance/Gate.io 需要
         # 拆成独立账户类型/venue），通过 instrument_types 元组同时加载两类合约。
         "key": BITFINEX,
-        "roles": {"secondary", "main_perp"},
+        "roles": {"main_spot", "main_perp"},
         "config": lambda: BitfinexDataClientConfig(
             instrument_types=(BitfinexInstrumentType.SPOT, BitfinexInstrumentType.PERPETUAL),
             instrument_provider=InstrumentProviderConfig(load_all=True),

@@ -1,6 +1,6 @@
 """交易所配置动态生成模块：根据用户指定的主所+副所，动态构建 data/exec client 配置。
 
-支持的主所（必须同时有现货+永续）：BINANCE, GATEIO, OKX
+支持的主所（必须同时有现货+永续）：BINANCE, GATEIO, OKX, BITFINEX
 支持的副所（只需要现货）：KRAKEN, BITFINEX, 以及所有主所的现货部分
 
 使用示例:
@@ -58,7 +58,7 @@ def build_venue_config(
     """构建指定主所+副所的完整配置（data/exec clients + factories）。
 
     Args:
-        main_venue: 主所名称（BINANCE, GATEIO, OKX），必须同时有现货+永续
+        main_venue: 主所名称（BINANCE, GATEIO, OKX, BITFINEX），必须同时有现货+永续
         secondary_venue: 副所名称（KRAKEN, BITFINEX, 或任意主所），只需要现货
         binance_environment: Binance 环境（LIVE 或 TESTNET），只影响 BINANCE 相关配置
 
@@ -168,9 +168,24 @@ def build_venue_config(
         data_factories[OKX] = OKXLiveDataClientFactory
         exec_factories[OKX] = OKXLiveExecClientFactory
 
+    elif main_venue == BITFINEX:
+        main_spot_venue = BITFINEX
+        main_perp_venue = BITFINEX  # Bitfinex 现货和永续共用同一个 venue
+
+        data_clients[BITFINEX] = BitfinexDataClientConfig(
+            instrument_types=(BitfinexInstrumentType.SPOT, BitfinexInstrumentType.PERPETUAL),
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        )
+        exec_clients[BITFINEX] = BitfinexExecClientConfig(
+            instrument_types=(BitfinexInstrumentType.SPOT, BitfinexInstrumentType.PERPETUAL),
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        )
+        data_factories[BITFINEX] = BitfinexLiveDataClientFactory
+        exec_factories[BITFINEX] = BitfinexLiveExecClientFactory
+
     else:
         raise ValueError(
-            f"不支持的主所: {main_venue}，支持的主所: BINANCE, GATEIO, OKX"
+            f"不支持的主所: {main_venue}，支持的主所: BINANCE, GATEIO, OKX, BITFINEX"
         )
 
     # 配置副所（只需现货）
@@ -192,7 +207,7 @@ def build_venue_config(
         data_factories[KRAKEN] = KrakenLiveDataClientFactory
         exec_factories[KRAKEN] = KrakenLiveExecClientFactory
 
-    elif secondary_venue == BITFINEX:
+    elif secondary_venue == BITFINEX and main_venue != BITFINEX:
         secondary_spot_venue = BITFINEX
 
         data_clients[BITFINEX] = BitfinexDataClientConfig(
