@@ -48,6 +48,9 @@ def main() -> None:
                         help="建仓预期收益需覆盖提现手续费的倍数（默认 3）")
     parser.add_argument("--fees", type=str, default="",
                         help="覆盖手续费，格式: BINANCE=0.00075,KRAKEN=0.0005")
+    parser.add_argument("--debug-ignore-fees", action="store_true",
+                        help="调试模式：建仓/套利触发阈值判断时手续费按 0 处理（去掉手续费扣除），"
+                             "人为放大触发机会以测试整套流程；只能配合 --dry-run 使用")
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True,
                         help="dry-run 模式（默认开启，不真实下单/提现）；--no-dry-run 关闭")
     parser.add_argument("--pause-flag-path", type=str, default="ARB_PAUSED",
@@ -60,6 +63,13 @@ def main() -> None:
     if args.main_venue.upper() == args.secondary_venue.upper():
         print(f"[exec] 错误：主所和副所不能相同（{args.main_venue}）")
         return
+
+    if args.debug_ignore_fees and not args.dry_run:
+        print("[exec] 错误：--debug-ignore-fees 只能配合 dry-run 使用（会用失真的净价差触发真实下单/提现）")
+        return
+    if args.debug_ignore_fees:
+        print("[DEBUG] --debug-ignore-fees 已开启：触发阈值判断将忽略手续费（按 0 计算），"
+              "仅用于 dry-run 测试整套流程，不代表真实可执行收益！")
 
     binance_env = BinanceEnvironment.TESTNET if args.binance_environment == "testnet" else BinanceEnvironment.LIVE
     if binance_env == BinanceEnvironment.TESTNET and not args.dry_run:
@@ -109,6 +119,7 @@ def main() -> None:
             withdrawal_timeout_secs=args.withdrawal_timeout,
             withdrawal_fee_safety_multiple=args.withdrawal_fee_safety_multiple,
             venue_fees_json=json.dumps(venue_fees),
+            debug_ignore_fees=args.debug_ignore_fees,
             dry_run=args.dry_run,
             pause_flag_path=args.pause_flag_path,
         ),

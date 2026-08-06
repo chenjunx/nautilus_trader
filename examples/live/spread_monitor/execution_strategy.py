@@ -67,6 +67,9 @@ class ArbExecutionConfig(StrategyConfig, frozen=True):
     withdrawal_timeout_secs: float = 3600.0
     withdrawal_fee_safety_multiple: float = 3.0
     venue_fees_json: str = "{}"
+    # 调试模式：净价差计算时手续费按 0 处理（去掉手续费扣除），
+    # 用于人为放大触发机会，跑通整套建仓/套利流程；仅应配合 dry_run=True 使用。
+    debug_ignore_fees: bool = False
     dry_run: bool = True
     pause_flag_path: str = "ARB_PAUSED"
 
@@ -76,6 +79,7 @@ class ArbExecutionStrategy(Strategy):
         super().__init__(config)
         self._dry_run = config.dry_run
         self._venue_defaults: dict[str, float] = json.loads(config.venue_fees_json)
+        self._debug_ignore_fees = config.debug_ignore_fees
 
         # 从配置读取主副所 venue keys
         self._main_spot_venue = config.main_spot_venue
@@ -98,6 +102,19 @@ class ArbExecutionStrategy(Strategy):
     # ------------------------------------------------------------------ 启动 --
 
     def on_start(self) -> None:
+        if self._debug_ignore_fees and not self._dry_run:
+            self.log.error(
+                "[exec] debug_ignore_fees=True 只能配合 dry_run 使用（会用失真的净价差触发真实下单/提现），"
+                "停止启动",
+            )
+            self.stop()
+            return
+        if self._debug_ignore_fees:
+            self.log.warning(
+                "[DEBUG] debug_ignore_fees=True：建仓/套利触发阈值判断已去掉手续费扣除（fee=0），"
+                "仅用于 dry-run 测试整套流程，不代表真实可执行收益！",
+            )
+
         bases = sorted(_parse_csv_set(self.config.bases_csv))
         if not bases:
             self.log.error("[exec] --bases 为空，未指定任何币种，停止启动")
@@ -223,6 +240,8 @@ class ArbExecutionStrategy(Strategy):
         return self._count_in_progress_builds() * self.config.build_notional_usdt
 
     def _fee_of(self, base: str, venue: str) -> float:
+        if self._debug_ignore_fees:
+            return 0.0
         inst = self._spot_inst.get(base, {}).get(venue)
         if inst is not None and float(inst.taker_fee) > 0:
             return float(inst.taker_fee)

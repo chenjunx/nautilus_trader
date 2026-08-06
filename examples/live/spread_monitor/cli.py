@@ -30,6 +30,9 @@ def main() -> None:
                         help="覆盖手续费，格式: BINANCE=0.00075,KRAKEN=0.0005（默认各所折扣后费率）")
     parser.add_argument("--alert-only", action="store_true",
                         help="只在 net>0 时输出，适合后台运行")
+    parser.add_argument("--debug-ignore-fees", action="store_true",
+                        help="调试模式：净价差计算时手续费按 0 处理（去掉手续费扣除），"
+                             "人为放大触发机会以测试整套流程；打印的净价差不代表真实可执行收益")
     parser.add_argument("--mode", choices=["auto", "manual"], default="auto",
                         help="匹配模式：auto=自动发现（默认），manual=手动指定币种和主副所")
     parser.add_argument("--symbols", type=str, default="",
@@ -63,6 +66,9 @@ def main() -> None:
     print("[fees] 使用手续费率:")
     for v, f in venue_fees.items():
         print(f"  {v}: {f*100:.4f}%")
+    if args.debug_ignore_fees:
+        print("[DEBUG] --debug-ignore-fees 已开启：净价差计算将忽略上面的手续费率（按 0 计算），"
+              "仅用于测试流程，不代表真实可执行收益！")
 
     chain_support_json = "{}"
     if args.require_common_chain:
@@ -90,6 +96,7 @@ def main() -> None:
             summary_interval=args.summary,
             alert_only=args.alert_only,
             venue_fees_json=json.dumps(venue_fees),
+            debug_ignore_fees=args.debug_ignore_fees,
             mode=args.mode,
             manual_symbols_csv=args.symbols,
             manual_main_csv=args.main,

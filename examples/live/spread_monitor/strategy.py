@@ -28,6 +28,9 @@ class SpreadMonitorConfig(StrategyConfig, frozen=True):
     summary_interval: int = 30
     alert_only: bool = False
     venue_fees_json: str = "{}"
+    # 调试模式：净价差计算时手续费按 0 处理（去掉手续费扣除），
+    # 用于人为放大触发机会，跑通整套流程；真实费率仍照常拉取/展示，只是不参与净价差计算。
+    debug_ignore_fees: bool = False
     # 匹配模式："auto"（自动发现，默认）或 "manual"（手动指定币种+主副所）
     mode: str = "auto"
     manual_symbols_csv: str = ""
@@ -65,6 +68,7 @@ class SpreadMonitor(Strategy):
         self._summary_interval = config.summary_interval
         self._alert_only = config.alert_only
         self._venue_defaults: dict[str, float] = json.loads(config.venue_fees_json)
+        self._debug_ignore_fees = config.debug_ignore_fees
 
         self._mode = config.mode
         self._manual_symbols = _parse_csv_set(config.manual_symbols_csv)
@@ -222,6 +226,12 @@ class SpreadMonitor(Strategy):
         return result
 
     def on_start(self) -> None:
+        if self._debug_ignore_fees:
+            self.log.warning(
+                "[DEBUG] debug_ignore_fees=True：净价差计算已去掉手续费扣除（fee=0），"
+                "仅用于测试流程，打印出的净价差不代表真实可执行收益！",
+            )
+
         instruments = self.cache.instruments()
         self.log.info(f"Cache contains {len(instruments)} instruments")
 
@@ -425,6 +435,8 @@ class SpreadMonitor(Strategy):
         return "unknown"
 
     def _fee_of(self, base: str, venue: str) -> float:
+        if self._debug_ignore_fees:
+            return 0.0
         return next(
             (self._inst_fee[k] for k in self._inst_fee
              if self._inst_to_base.get(k) == base and venue in k),
@@ -465,6 +477,8 @@ class SpreadMonitor(Strategy):
         fee_s: float,
     ) -> None:
         tag = ">> ARBI" if net_pct > 0 else "   norm"
+        if self._debug_ignore_fees:
+            tag = f"[DEBUG-NOFEE] {tag}"
         prices = "  ".join(
             f"{v}:{venue_data[v][0]:.6g}/{venue_data[v][1]:.6g}"
             for v in sorted(venue_data)
@@ -496,7 +510,10 @@ class SpreadMonitor(Strategy):
         if rows:
             rows.sort(reverse=True)
             ts = time.strftime("%H:%M:%S")
-            print(f"\n{ts} ══ TOP 20 净价差排名（主所↔副所，扣除手续费后）══")
+            title = "TOP 20 净价差排名（主所↔副所，扣除手续费后）"
+            if self._debug_ignore_fees:
+                title = "TOP 20 净价差排名（主所↔副所，[DEBUG] 手续费按 0 计算）"
+            print(f"\n{ts} ══ {title} ══")
             fmt = "  {:<6}  {:<14}  gross={:+.5f}%  fees={:.3f}%  net={:+.5f}%  ({} → {})"
             for net_pct, gross_pct, base, venue_data, buy_v, sell_v, fee_b, fee_s in rows[:20]:
                 tag = "ARBI" if net_pct > 0 else "norm"
