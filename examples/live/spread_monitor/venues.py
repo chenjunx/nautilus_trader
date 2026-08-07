@@ -7,6 +7,9 @@ from nautilus_trader.adapters.bitfinex import BITFINEX
 from nautilus_trader.adapters.bitfinex import BitfinexDataClientConfig
 from nautilus_trader.adapters.bitfinex import BitfinexInstrumentType
 from nautilus_trader.adapters.bitfinex import BitfinexLiveDataClientFactory
+from nautilus_trader.adapters.bybit import BYBIT
+from nautilus_trader.adapters.bybit import BybitDataClientConfig
+from nautilus_trader.adapters.bybit import BybitLiveDataClientFactory
 from nautilus_trader.adapters.gateio import GATEIO
 from nautilus_trader.adapters.gateio import GateIoAccountType
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
@@ -20,6 +23,8 @@ from nautilus_trader.adapters.okx import OKX
 from nautilus_trader.adapters.okx import OKXDataClientConfig
 from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
+from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.core.nautilus_pyo3 import OKXContractType
 from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
 from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
@@ -123,6 +128,19 @@ VENUE_REGISTRY: list[dict] = [
         ),
         "factory": OKXLiveDataClientFactory,
         "default_fee": 0.00064,   # OKX 现货 taker，8折折扣后（原始 0.00080）
+    },
+    {
+        # Bybit 现货与 USDT 永续（linear）共用同一个 client 一起加载（不像 Binance/Gate.io 需要
+        # 独立账户类型/venue 拆分），因此单条记录即可同时具备 main_spot + main_perp。
+        "key": BYBIT,
+        "roles": {"main_spot", "main_perp"},
+        "config": lambda: BybitDataClientConfig(
+            product_types=(BybitProductType.SPOT, BybitProductType.LINEAR),
+            environment=BybitEnvironment.MAINNET,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        ),
+        "factory": BybitLiveDataClientFactory,
+        "default_fee": 0.00100,   # Bybit 现货 taker 标准费率（未按 VIP/持仓折扣计入），需按实际账户等级核实
     },
 ]
 

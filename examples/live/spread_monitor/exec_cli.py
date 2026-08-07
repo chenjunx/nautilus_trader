@@ -18,10 +18,10 @@ def main() -> None:
         description="跨所现货 delta-neutral 建仓 + 套利执行（支持自定义主所+副所）",
     )
     parser.add_argument("--main-venue", type=str, required=True,
-                        choices=["BINANCE", "GATEIO", "OKX", "BITFINEX"],
+                        choices=["BINANCE", "GATEIO", "OKX", "BITFINEX", "BYBIT"],
                         help="主所（现货+永续，用于建仓对冲），必填")
     parser.add_argument("--secondary-venue", type=str, required=True,
-                        choices=["KRAKEN", "BITFINEX", "BINANCE", "GATEIO", "OKX"],
+                        choices=["KRAKEN", "BITFINEX", "BINANCE", "GATEIO", "OKX", "BYBIT"],
                         help="副所（只交易现货），必填，不可与主所相同")
     parser.add_argument("--bases", type=str, required=True,
                         help="逗号分隔的币种列表，无自动发现，如 DOGE,ADA（必填）")

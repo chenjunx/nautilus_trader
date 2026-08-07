@@ -8,10 +8,12 @@ from collections.abc import Callable
 
 from nautilus_trader.adapters.binance import BINANCE
 from nautilus_trader.adapters.bitfinex import BITFINEX
+from nautilus_trader.adapters.bybit import BYBIT
 from nautilus_trader.adapters.gateio import GATEIO
 from nautilus_trader.adapters.kraken import KRAKEN
 from spread_monitor.wallet import binance
 from spread_monitor.wallet import bitfinex
+from spread_monitor.wallet import bybit
 from spread_monitor.wallet import gateio
 from spread_monitor.wallet import kraken
 
@@ -20,4 +22,5 @@ WALLET_REGISTRY: dict[str, Callable[[], object | None]] = {
     KRAKEN: kraken.from_env,
     GATEIO: gateio.from_env,
     BITFINEX: bitfinex.from_env,
+    BYBIT: bybit.from_env,
 }

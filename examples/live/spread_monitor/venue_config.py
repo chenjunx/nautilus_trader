@@ -1,6 +1,6 @@
 """交易所配置动态生成模块：根据用户指定的主所+副所，动态构建 data/exec client 配置。
 
-支持的主所（必须同时有现货+永续）：BINANCE, GATEIO, OKX, BITFINEX
+支持的主所（必须同时有现货+永续）：BINANCE, GATEIO, OKX, BITFINEX, BYBIT
 支持的副所（只需要现货）：KRAKEN, BITFINEX, 以及所有主所的现货部分
 
 使用示例:
@@ -21,6 +21,11 @@ from nautilus_trader.adapters.bitfinex import BitfinexExecClientConfig
 from nautilus_trader.adapters.bitfinex import BitfinexInstrumentType
 from nautilus_trader.adapters.bitfinex import BitfinexLiveDataClientFactory
 from nautilus_trader.adapters.bitfinex import BitfinexLiveExecClientFactory
+from nautilus_trader.adapters.bybit import BYBIT
+from nautilus_trader.adapters.bybit import BybitDataClientConfig
+from nautilus_trader.adapters.bybit import BybitExecClientConfig
+from nautilus_trader.adapters.bybit import BybitLiveDataClientFactory
+from nautilus_trader.adapters.bybit import BybitLiveExecClientFactory
 from nautilus_trader.adapters.gateio import GATEIO
 from nautilus_trader.adapters.gateio import GateIoAccountType
 from nautilus_trader.adapters.gateio import GateIoDataClientConfig
@@ -40,6 +45,8 @@ from nautilus_trader.adapters.okx import OKXExecClientConfig
 from nautilus_trader.adapters.okx import OKXLiveDataClientFactory
 from nautilus_trader.adapters.okx import OKXLiveExecClientFactory
 from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
+from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.core.nautilus_pyo3 import OKXContractType
 from nautilus_trader.core.nautilus_pyo3 import OKXEnvironment
 from nautilus_trader.core.nautilus_pyo3 import OKXInstrumentType
@@ -183,9 +190,26 @@ def build_venue_config(
         data_factories[BITFINEX] = BitfinexLiveDataClientFactory
         exec_factories[BITFINEX] = BitfinexLiveExecClientFactory
 
+    elif main_venue == BYBIT:
+        main_spot_venue = BYBIT
+        main_perp_venue = BYBIT  # Bybit 现货和永续（linear）共用同一个 venue
+
+        data_clients[BYBIT] = BybitDataClientConfig(
+            product_types=(BybitProductType.SPOT, BybitProductType.LINEAR),
+            environment=BybitEnvironment.MAINNET,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        )
+        exec_clients[BYBIT] = BybitExecClientConfig(
+            product_types=(BybitProductType.SPOT, BybitProductType.LINEAR),
+            environment=BybitEnvironment.MAINNET,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        )
+        data_factories[BYBIT] = BybitLiveDataClientFactory
+        exec_factories[BYBIT] = BybitLiveExecClientFactory
+
     else:
         raise ValueError(
-            f"不支持的主所: {main_venue}，支持的主所: BINANCE, GATEIO, OKX, BITFINEX"
+            f"不支持的主所: {main_venue}，支持的主所: BINANCE, GATEIO, OKX, BITFINEX, BYBIT"
         )
 
     # 配置副所（只需现货）
@@ -269,9 +293,27 @@ def build_venue_config(
         data_factories[OKX] = OKXLiveDataClientFactory
         exec_factories[OKX] = OKXLiveExecClientFactory
 
+    elif secondary_venue == BYBIT and main_venue != BYBIT:
+        # 副所是 BYBIT 现货（主所不是 BYBIT 时）
+        secondary_spot_venue = BYBIT
+
+        data_clients[BYBIT] = BybitDataClientConfig(
+            product_types=(BybitProductType.SPOT,),
+            environment=BybitEnvironment.MAINNET,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        )
+        exec_clients[BYBIT] = BybitExecClientConfig(
+            product_types=(BybitProductType.SPOT,),
+            environment=BybitEnvironment.MAINNET,
+            instrument_provider=InstrumentProviderConfig(load_all=True),
+        )
+        data_factories[BYBIT] = BybitLiveDataClientFactory
+        exec_factories[BYBIT] = BybitLiveExecClientFactory
+
     else:
         raise ValueError(
-            f"不支持的副所: {secondary_venue}，或主副所相同。支持的副所: KRAKEN, BITFINEX, BINANCE, GATEIO, OKX"
+            f"不支持的副所: {secondary_venue}，或主副所相同。"
+            f"支持的副所: KRAKEN, BITFINEX, BINANCE, GATEIO, OKX, BYBIT"
         )
 
     return {
