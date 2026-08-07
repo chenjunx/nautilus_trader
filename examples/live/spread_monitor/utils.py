@@ -12,7 +12,10 @@ def _parse_csv_set(csv_str: str) -> set[str]:
 # （SHIBUSDT，baseAsset="SHIB"）。不同所的前缀集合不通用（甚至有的所根本不这么做，如 OKX/
 # Gate.io 把倍数放在独立的 multiplier 字段里），所以按 venue 定制一张前缀表。
 _LEVERAGED_PREFIXES_BY_VENUE: dict[str, tuple[str, ...]] = {
+    # 注意：Binance 现货/永续在本项目里是两个不同的 venue key（"BINANCE" / "BINANCE_FUT"，
+    # 见 venue_config.py 的 BINANCE_FUT_KEY），放大面值命名只出现在永续侧，两个 key 都要配置。
     "BINANCE": ("10000000", "1000000", "100000", "10000", "1000"),
+    "BINANCE_FUT": ("10000000", "1000000", "100000", "10000", "1000"),
     "BYBIT": ("1000000", "100000", "10000", "1000", "100", "10"),
     # OKX/GATEIO/其他所：不配置 = 不做任何拆分（这些所的 base_currency 已经是纯币种名）
 }

@@ -22,6 +22,13 @@ def test_split_leveraged_base_bybit_uses_its_own_table():
     assert split_leveraged_base("BYBIT", "100PEPE") == ("PEPE", 100)
 
 
+def test_split_leveraged_base_binance_fut_venue_key_also_configured():
+    """execution_strategy.py 里传入的 main_perp_venue 对 Binance 是 "BINANCE_FUT"
+    （现货是 "BINANCE"），两个 venue key 都要能拆分，否则永续侧匹配不上现货。
+    """
+    assert split_leveraged_base("BINANCE_FUT", "1000SHIB") == ("SHIB", 1000)
+
+
 def test_split_leveraged_base_unconfigured_venue_returns_as_is():
     """OKX/Gate.io 等未配置前缀表的所，base_currency 本来就是纯币种名，不做拆分。"""
     assert split_leveraged_base("OKX", "1000SHIB") == ("1000SHIB", 1)
