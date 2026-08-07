@@ -2,6 +2,8 @@ import argparse
 import json
 
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+from nautilus_trader.cache.config import CacheConfig
+from nautilus_trader.common.config import DatabaseConfig
 from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
@@ -57,7 +59,28 @@ def main() -> None:
                         help="该文件存在时暂停新建仓/新套利单（默认 ARB_PAUSED）")
     parser.add_argument("--binance-environment", type=str, default="live",
                         choices=["live", "testnet"])
+    parser.add_argument("--redis-host", type=str, default="127.0.0.1",
+                        help="cache 持久化用的 Redis 地址（默认 127.0.0.1，本机 Redis）")
+    parser.add_argument("--redis-port", type=int, default=6379)
+    parser.add_argument("--redis-password", type=str, default=None,
+                        help="Redis 密码，默认无密码")
+    parser.add_argument("--redis-ssl", action="store_true")
+    parser.add_argument("--no-redis", action="store_true",
+                        help="不使用 Redis，cache 纯内存，进程重启会丢失套利状态机"
+                             "（可能导致重复建仓，仅限本地无 Redis 环境下调试用）")
     args = parser.parse_args()
+
+    if args.no_redis:
+        if not args.dry_run:
+            print(
+                "[exec] 错误：--no-dry-run 不能配合 --no-redis 使用，"
+                "否则 cache 纯内存、进程重启会丢失套利状态机导致重复建仓",
+            )
+            return
+        print(
+            "[exec] 警告：--no-redis 已开启，cache 将是纯内存的，进程重启会丢失套利状态机、"
+            "可能导致重复建仓，仅建议在 dry-run/调试时这样用",
+        )
 
     # 验证主副所不能相同
     if args.main_venue.upper() == args.secondary_venue.upper():
@@ -91,9 +114,25 @@ def main() -> None:
         print(f"[exec] 配置错误: {e}")
         return
 
+    cache_config = (
+        CacheConfig()
+        if args.no_redis
+        else CacheConfig(
+            database=DatabaseConfig(
+                type="redis",
+                host=args.redis_host,
+                port=args.redis_port,
+                password=args.redis_password,
+                ssl=args.redis_ssl,
+            ),
+            flush_on_start=False,
+        )
+    )
+
     config_node = TradingNodeConfig(
         trader_id="ARB-EXEC-001",
         logging=LoggingConfig(log_level=args.log_level),
+        cache=cache_config,
         exec_engine=LiveExecEngineConfig(reconciliation=True),
         data_clients=venue_cfg["data_clients"],
         exec_clients=venue_cfg["exec_clients"],
