@@ -32,12 +32,17 @@ class BitfinexDataClientConfig(LiveDataClientConfig, frozen=True):
     instrument_types : tuple[BitfinexInstrumentType, ...], default (BitfinexInstrumentType.SPOT,)
         The instrument types to load and subscribe. Include `BitfinexInstrumentType.PERPETUAL`
         to also load USDT-margined perpetual futures.
+    max_subscriptions_per_connection : PositiveInt, default 25
+        The maximum number of ticker subscriptions per WebSocket connection. Bitfinex
+        currently caps public channel subscriptions at 25 per connection; once reached,
+        the client automatically opens an additional connection.
 
     """
 
     base_url_http: str | None = None
     base_url_ws: str | None = None
     instrument_types: tuple[BitfinexInstrumentType, ...] = (BitfinexInstrumentType.SPOT,)
+    max_subscriptions_per_connection: PositiveInt = 25
 
 
 class BitfinexExecClientConfig(LiveExecClientConfig, frozen=True):

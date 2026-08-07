@@ -89,13 +89,15 @@ class BitfinexDataClient(LiveMarketDataClient):
             loop=loop,
             url=ws_url,
             handler=self._handle_ws_message,
-            handler_reconnect=self._resubscribe,
+            handler_reconnect=self._handle_reconnect,
+            max_subscriptions_per_connection=config.max_subscriptions_per_connection,
         )
 
-        # chanId → pair (without t-prefix, e.g. "BTCUSD")
-        self._channel_map: dict[int, str] = {}
-        # pair → chanId (for unsubscribe)
-        self._symbol_chan_map: dict[str, int] = {}
+        # (client_id, chanId) → pair (without t-prefix, e.g. "BTCUSD")
+        # chanId is scoped to its connection, so client_id disambiguates across the pool.
+        self._channel_map: dict[tuple[int, int], str] = {}
+        # Nautilus symbol → (client_id, chanId) (for unsubscribe)
+        self._symbol_chan_map: dict[str, tuple[int, int]] = {}
 
         self._decoder_event = msgspec.json.Decoder(BitfinexEventMessage)
         self._subscribed_symbols: set[str] = set()
@@ -132,25 +134,26 @@ class BitfinexDataClient(LiveMarketDataClient):
     async def _unsubscribe_quote_ticks(self, command: UnsubscribeQuoteTicks) -> None:
         symbol = command.instrument_id.symbol.value  # Nautilus symbol
         if symbol in self._symbol_chan_map:
-            chan_id = self._symbol_chan_map.pop(symbol)
-            self._channel_map.pop(chan_id, None)
-            await self._ws_client.unsubscribe_ticker(chan_id)
+            client_id, chan_id = self._symbol_chan_map.pop(symbol)
+            self._channel_map.pop((client_id, chan_id), None)
+            bitfinex_native = nautilus_to_bitfinex_pair(symbol)
+            await self._ws_client.unsubscribe_ticker(bitfinex_native, client_id, chan_id)
         self._subscribed_symbols.discard(symbol)
 
     # -- WebSocket message handlers --------------------------------------------------------------
 
-    def _handle_ws_message(self, raw: bytes) -> None:
+    def _handle_ws_message(self, client_id: int, raw: bytes) -> None:
         """Dispatch incoming raw WebSocket bytes to the appropriate handler."""
         if not raw:
             return
         if raw[0:1] == b"{":
             # JSON object — control message (info / subscribed / error / unsubscribed)
-            self._handle_event_message(raw)
+            self._handle_event_message(client_id, raw)
         elif raw[0:1] == b"[":
             # JSON array — ticker data or heartbeat
-            self._handle_data_message(raw)
+            self._handle_data_message(client_id, raw)
 
-    def _handle_event_message(self, raw: bytes) -> None:
+    def _handle_event_message(self, client_id: int, raw: bytes) -> None:
         try:
             msg = self._decoder_event.decode(raw)
         except Exception as e:
@@ -165,26 +168,28 @@ class BitfinexDataClient(LiveMarketDataClient):
             if msg.chanId is not None and msg.pair:
                 # Store both maps keyed by Nautilus symbol for consistent lookup
                 nautilus_sym = bitfinex_pair_to_nautilus(msg.pair)
-                self._channel_map[msg.chanId] = msg.pair          # chanId → Bitfinex native
-                self._symbol_chan_map[nautilus_sym] = msg.chanId  # Nautilus symbol → chanId
+                key = (client_id, msg.chanId)
+                self._channel_map[key] = msg.pair  # (client_id, chanId) → native pair
+                self._symbol_chan_map[nautilus_sym] = key  # symbol → (client_id, chanId)
                 self._log.debug(
-                    f"Channel registered: chanId={msg.chanId} pair={msg.pair} → {nautilus_sym}"
+                    f"ws-client {client_id}: Channel registered: chanId={msg.chanId} "
+                    f"pair={msg.pair} → {nautilus_sym}"
                 )
 
         elif msg.event == "unsubscribed":
             if msg.chanId is not None:
-                raw_pair = self._channel_map.pop(msg.chanId, None)
+                raw_pair = self._channel_map.pop((client_id, msg.chanId), None)
                 if raw_pair is not None:
                     self._symbol_chan_map.pop(bitfinex_pair_to_nautilus(raw_pair), None)
-                self._log.debug(f"Channel removed: chanId={msg.chanId}")
+                self._log.debug(f"ws-client {client_id}: Channel removed: chanId={msg.chanId}")
 
         elif msg.event == "error":
             self._log.error(
-                f"Bitfinex WS error code={msg.code}: {msg.msg} "
+                f"ws-client {client_id}: Bitfinex WS error code={msg.code}: {msg.msg} "
                 f"(symbol={msg.symbol}, pair={msg.pair})"
             )
 
-    def _handle_data_message(self, raw: bytes) -> None:
+    def _handle_data_message(self, client_id: int, raw: bytes) -> None:
         try:
             data = msgspec.json.decode(raw)  # list
         except Exception:
@@ -204,7 +209,7 @@ class BitfinexDataClient(LiveMarketDataClient):
         if not isinstance(payload, list) or len(payload) < 4:
             return
 
-        raw_pair = self._channel_map.get(chan_id)
+        raw_pair = self._channel_map.get((client_id, chan_id))
         if raw_pair is None:
             return
 
@@ -237,14 +242,19 @@ class BitfinexDataClient(LiveMarketDataClient):
 
         self._handle_data(quote)
 
-    async def _resubscribe(self) -> None:
-        """Re-subscribe to all active ticker channels after WebSocket reconnection."""
-        self._channel_map.clear()
-        self._symbol_chan_map.clear()
-        if self._subscribed_symbols:
-            self._log.info(
-                f"Resubscribing to {len(self._subscribed_symbols)} symbols..."
-            )
-            for symbol in self._subscribed_symbols:
-                bitfinex_native = nautilus_to_bitfinex_pair(symbol)
-                await self._ws_client.subscribe_ticker(bitfinex_native)
+    async def _handle_reconnect(self, client_id: int) -> None:
+        """
+        Clear stale channel mappings for a single reconnected pooled connection.
+
+        The pooled `BitfinexWebSocketClient` handles re-sending the subscribe frames
+        for that connection itself; this only drops the old chanId mappings so they
+        aren't mistaken for the freshly (re-)assigned ones once new `subscribed`
+        events arrive.
+        """
+        stale_symbols = [
+            symbol for symbol, (cid, _) in self._symbol_chan_map.items() if cid == client_id
+        ]
+        for symbol in stale_symbols:
+            cid, chan_id = self._symbol_chan_map.pop(symbol)
+            self._channel_map.pop((cid, chan_id), None)
+        self._log.info(f"ws-client {client_id}: Reconnected, cleared stale channel mappings")
