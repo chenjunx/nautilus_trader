@@ -31,9 +31,12 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.trading.strategy import Strategy
+from spread_monitor.guardrails import check_buy_side_is_main_venue
 from spread_monitor.guardrails import check_global_notional_cap
 from spread_monitor.guardrails import check_max_active_bases
 from spread_monitor.guardrails import check_max_concurrent_builds
+from spread_monitor.guardrails import check_net_pct_threshold
+from spread_monitor.guardrails import check_perp_hedge_quantity
 from spread_monitor.guardrails import check_withdrawal_economics
 from spread_monitor.guardrails import is_paused
 from spread_monitor.pricing import best_pair_arb
@@ -43,6 +46,7 @@ from spread_monitor.state import ArbState
 from spread_monitor.state import ArbStateStore
 from spread_monitor.state import Phase
 from spread_monitor.utils import _parse_csv_set
+from spread_monitor.utils import split_leveraged_base
 from spread_monitor.wallet import WALLET_REGISTRY
 
 
@@ -90,6 +94,7 @@ class ArbExecutionStrategy(Strategy):
         self._states: dict[str, ArbState] = {}
         self._spot_inst: dict[str, dict[str, object]] = {}
         self._perp_inst: dict[str, object] = {}
+        self._perp_multiplier: dict[str, int] = {}
         self._inst_to_base_venue: dict[str, tuple[str, str]] = {}
         self._prices: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
         self._client_order_index: dict[str, tuple[str, str]] = {}
@@ -139,6 +144,7 @@ class ArbExecutionStrategy(Strategy):
 
         spot_by_base: dict[str, dict[str, object]] = defaultdict(dict)
         perp_by_base: dict[str, object] = {}
+        perp_multiplier_by_base: dict[str, int] = {}
         for inst in self.cache.instruments():
             try:
                 base = str(inst.base_currency)
@@ -151,7 +157,9 @@ class ArbExecutionStrategy(Strategy):
             if isinstance(inst, CurrencyPair) and venue in (main_spot, secondary_spot):
                 spot_by_base[base][venue] = inst
             elif isinstance(inst, CryptoPerpetual) and venue == main_perp:
-                perp_by_base[base] = inst
+                real_base, multiplier = split_leveraged_base(main_perp, base)
+                perp_by_base[real_base] = inst
+                perp_multiplier_by_base[real_base] = multiplier
 
         self._store = ArbStateStore(self.cache)
 
@@ -169,6 +177,10 @@ class ArbExecutionStrategy(Strategy):
 
             self._spot_inst[base] = venues
             self._perp_inst[base] = perp
+            multiplier = perp_multiplier_by_base.get(base, 1)
+            self._perp_multiplier[base] = multiplier
+            if multiplier != 1:
+                self.log.info(f"[exec] {base} 永续合约 {perp.id} 为放大面值合约：1 张 = {multiplier} 个真实 {base}")
             for venue, inst in venues.items():
                 self._inst_to_base_venue[str(inst.id)] = (base, venue)
                 self.subscribe_quote_ticks(inst.id)
@@ -269,6 +281,27 @@ class ArbExecutionStrategy(Strategy):
 
     # ------------------------------------------------------------------ 建仓 --
 
+    def _build_guardrail_chain(
+        self, base: str, net_pct: float, buy_v: str, qty: Decimal,
+        multiplier: int, perp_min_quantity, withdraw_fee_usdt: float,
+    ) -> list[tuple[bool, str]]:
+        """建仓前风控校验链，按顺序短路检查；新增规则只需在此列表追加一项。"""
+        return [
+            check_max_concurrent_builds(self._count_in_progress_builds(), self.config.max_concurrent_builds),
+            check_max_active_bases(self._count_active_bases(), self.config.max_active_bases),
+            check_global_notional_cap(
+                self._committed_notional_usdt(), self.config.build_notional_usdt,
+                self.config.global_notional_cap_usdt,
+            ),
+            check_net_pct_threshold(net_pct, self.config.build_trigger_net_pct),
+            check_buy_side_is_main_venue(buy_v, self._main_spot_venue),
+            check_perp_hedge_quantity(qty, multiplier, perp_min_quantity),
+            check_withdrawal_economics(
+                self.config.build_notional_usdt, net_pct, withdraw_fee_usdt,
+                self.config.withdrawal_fee_safety_multiple,
+            ),
+        ]
+
     def _maybe_start_build(self, base: str) -> None:
         venue_data = self._prices.get(base, {})
         if self._main_spot_venue not in venue_data or self._secondary_spot_venue not in venue_data:
@@ -276,54 +309,40 @@ class ArbExecutionStrategy(Strategy):
         if is_paused(self.config.pause_flag_path):
             return
 
-        for ok, reason in (
-            check_max_concurrent_builds(self._count_in_progress_builds(), self.config.max_concurrent_builds),
-            check_max_active_bases(self._count_active_bases(), self.config.max_active_bases),
-            check_global_notional_cap(
-                self._committed_notional_usdt(), self.config.build_notional_usdt,
-                self.config.global_notional_cap_usdt,
-            ),
-        ):
-            if not ok:
-                self.log.debug(f"[exec] {base} 建仓被风控拦截: {reason}")
-                return
-
         result = best_pair_arb(venue_data, fee_of=lambda v: self._fee_of(base, v))
         if result is None:
             return
         _gross_pct, net_pct, buy_v, buy_ask, _fee_b, _sell_v, sell_bid, _fee_s = result
-        if net_pct < self.config.build_trigger_net_pct:
-            return
-        if buy_v != self._main_spot_venue:
-            # v1 只在主所买现货建仓——只有主所才有永续可对冲；
-            # 若这一刻是副所更便宜，只能等下一次轮到主所更便宜时再建仓。
-            return
 
         chain = self._chain_info.get(base)
         if chain is None:
-            self._start_chain_lookup(base)
+            # 只有价差和买方看起来已经满足时才值得去异步查链信息，避免无意义的网络请求
+            if net_pct >= self.config.build_trigger_net_pct and buy_v == self._main_spot_venue:
+                self._start_chain_lookup(base)
             return
         if not chain.get("ok"):
             return
 
+        spot_inst = self._spot_inst[base][self._main_spot_venue]
+        qty = qty_for_notional(Decimal(str(self.config.build_notional_usdt)), Decimal(str(buy_ask)), spot_inst)
+        if qty is None:
+            self.log.debug(f"[exec] {base} 按 {self.config.build_notional_usdt} USDT 换算不出合法下单数量")
+            return
+
+        multiplier = self._perp_multiplier.get(base, 1)
+        perp_min_quantity = self._perp_inst[base].min_quantity
         mid = (buy_ask + sell_bid) / 2
         withdraw_fee_usdt = chain["binance_withdraw_fee_coin"] * mid
-        ok, reason = check_withdrawal_economics(
-            self.config.build_notional_usdt, net_pct, withdraw_fee_usdt,
-            self.config.withdrawal_fee_safety_multiple,
-        )
-        if not ok:
-            self.log.debug(f"[exec] {base} 触发建仓阈值但提现经济性不划算: {reason}")
-            return
 
-        self._submit_spot_build(base, buy_ask)
+        for ok, reason in self._build_guardrail_chain(base, net_pct, buy_v, qty, multiplier, perp_min_quantity, withdraw_fee_usdt):
+            if not ok:
+                self.log.debug(f"[exec] {base} 建仓被风控拦截: {reason}")
+                return
 
-    def _submit_spot_build(self, base: str, ask_price: float) -> None:
+        self._submit_spot_build(base, buy_ask, qty)
+
+    def _submit_spot_build(self, base: str, ask_price: float, qty: Decimal) -> None:
         inst = self._spot_inst[base][self._main_spot_venue]
-        qty = qty_for_notional(Decimal(str(self.config.build_notional_usdt)), Decimal(str(ask_price)), inst)
-        if qty is None:
-            self.log.warning(f"[exec] {base} 按 {self.config.build_notional_usdt} USDT 换算不出合法下单数量，跳过建仓")
-            return
 
         self.log.info(f"[exec] {base} 触发建仓：{self._main_spot_venue} 现货买入约 {self.config.build_notional_usdt} USDT @ ~{ask_price}")
 
@@ -359,17 +378,21 @@ class ArbExecutionStrategy(Strategy):
 
     def _submit_perp_hedge(self, base: str, qty: Decimal) -> None:
         perp_inst = self._perp_inst[base]
+        multiplier = self._perp_multiplier.get(base, 1)
+        contracts = qty / multiplier
 
         if self._dry_run:
             client_order_id = f"DRYRUN-PERP-{base}-{int(time.time() * 1000)}"
-            self.log.warning(f"[DRY-RUN] {base} 对冲永续空单 qty={qty}（未真实下单）")
+            self.log.warning(
+                f"[DRY-RUN] {base} 对冲永续空单 qty={qty}（{contracts} 张，倍数={multiplier}）（未真实下单）",
+            )
             self._client_order_index[client_order_id] = (base, "perp_build")
             self._advance_state(base, perp_client_order_id=client_order_id, perp_qty=str(qty))
             price = self._prices.get(base, {}).get(self._main_spot_venue, (0.0, 0.0))[0]
             self._on_perp_build_filled(base, qty, Decimal(str(price)))
             return
 
-        perp_qty = perp_inst.make_qty(qty)
+        perp_qty = perp_inst.make_qty(contracts)
         order = self.order_factory.market(
             instrument_id=perp_inst.id,
             order_side=OrderSide.SELL,
@@ -390,9 +413,10 @@ class ArbExecutionStrategy(Strategy):
 
     def _on_perp_build_filled(self, base: str, qty: Decimal, _price: Decimal) -> None:
         self.clock.cancel_timer(f"exec:perp_timeout:{base}")
-        self.log.info(f"[exec] {base} 永续对冲成交 qty={qty}，开始转账一半现货到 {self._secondary_spot_venue}")
+        spot_qty = Decimal(self._states[base].spot_qty)
+        self.log.info(f"[exec] {base} 永续对冲成交 perp_fill_qty={qty}（提现按现货成交量 spot_qty={spot_qty} 计算），开始转账一半现货到 {self._secondary_spot_venue}")
         self._advance_state(base, phase=Phase.TRANSFERRING, transfer_started_at_ts=time.time())
-        self._start_withdrawal(base, qty)
+        self._start_withdrawal(base, spot_qty)
 
     def _on_perp_timeout(self, base: str) -> None:
         state = self._states.get(base)

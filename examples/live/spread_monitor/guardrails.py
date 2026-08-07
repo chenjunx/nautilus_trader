@@ -53,3 +53,32 @@ def check_withdrawal_economics(
             f"< 提现手续费×{safety_multiple:g}={required_usdt:.4f} USDT"
         )
     return True, ""
+
+
+def check_net_pct_threshold(net_pct: float, trigger_pct: float) -> tuple[bool, str]:
+    if net_pct < trigger_pct:
+        return False, f"净价差 {net_pct:.4f}% 未达触发阈值 {trigger_pct:.4f}%"
+    return True, ""
+
+
+def check_buy_side_is_main_venue(buy_venue: str, main_spot_venue: str) -> tuple[bool, str]:
+    """v1 只在主所买现货建仓——只有主所才有永续可对冲；副所更便宜时本轮不建仓。"""
+    if buy_venue != main_spot_venue:
+        return False, f"当前更便宜的买方是 {buy_venue}，非主所 {main_spot_venue}，本轮不建仓"
+    return True, ""
+
+
+def check_perp_hedge_quantity(spot_qty, multiplier: int, perp_min_quantity) -> tuple[bool, str]:
+    """现货建仓数量换算成永续合约张数后，必须达到永续的最小下单量，否则这笔仓位无法对冲。
+
+    `perp_min_quantity` 为 None（该永续没有最小下单量限制）时直接放行。
+    """
+    if perp_min_quantity is None:
+        return True, ""
+    perp_qty = spot_qty / multiplier
+    if perp_qty < perp_min_quantity:
+        return False, (
+            f"换算后的永续对冲量 {perp_qty} 张 < 最小下单量 {perp_min_quantity} 张"
+            f"（现货 qty={spot_qty}，倍数={multiplier}）"
+        )
+    return True, ""

@@ -1,8 +1,12 @@
 import os
+from decimal import Decimal
 
+from spread_monitor.guardrails import check_buy_side_is_main_venue
 from spread_monitor.guardrails import check_global_notional_cap
 from spread_monitor.guardrails import check_max_active_bases
 from spread_monitor.guardrails import check_max_concurrent_builds
+from spread_monitor.guardrails import check_net_pct_threshold
+from spread_monitor.guardrails import check_perp_hedge_quantity
 from spread_monitor.guardrails import check_withdrawal_economics
 from spread_monitor.guardrails import is_paused
 
@@ -87,3 +91,47 @@ def test_check_withdrawal_economics_just_above_multiple_passes():
         safety_multiple=3.0,   # 0.4*3 = 1.2
     )
     assert ok
+
+
+def test_check_net_pct_threshold_below_trigger_blocks():
+    ok, reason = check_net_pct_threshold(net_pct=0.1, trigger_pct=0.15)
+    assert not ok
+    assert reason
+
+
+def test_check_net_pct_threshold_at_or_above_trigger_allows():
+    ok, reason = check_net_pct_threshold(net_pct=0.15, trigger_pct=0.15)
+    assert ok
+    assert reason == ""
+
+
+def test_check_buy_side_is_main_venue_matches_allows():
+    ok, reason = check_buy_side_is_main_venue(buy_venue="BINANCE", main_spot_venue="BINANCE")
+    assert ok
+    assert reason == ""
+
+
+def test_check_buy_side_is_main_venue_mismatch_blocks():
+    ok, reason = check_buy_side_is_main_venue(buy_venue="KRAKEN", main_spot_venue="BINANCE")
+    assert not ok
+    assert reason
+
+
+def test_check_perp_hedge_quantity_no_min_quantity_allows():
+    ok, reason = check_perp_hedge_quantity(spot_qty=Decimal("50"), multiplier=1000, perp_min_quantity=None)
+    assert ok
+    assert reason == ""
+
+
+def test_check_perp_hedge_quantity_enough_after_conversion_allows():
+    # 50000 / 1000 = 50 张 >= 最小 1 张
+    ok, reason = check_perp_hedge_quantity(spot_qty=Decimal("50000"), multiplier=1000, perp_min_quantity=Decimal("1"))
+    assert ok
+    assert reason == ""
+
+
+def test_check_perp_hedge_quantity_below_min_after_conversion_blocks():
+    # 300 / 1000 = 0.3 张 < 最小 1 张
+    ok, reason = check_perp_hedge_quantity(spot_qty=Decimal("300"), multiplier=1000, perp_min_quantity=Decimal("1"))
+    assert not ok
+    assert reason
