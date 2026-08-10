@@ -9,7 +9,15 @@ from decimal import Decimal
 
 
 def _dec(value) -> Decimal:
-    return value if isinstance(value, Decimal) else Decimal(str(value))
+    """统一转成 Decimal。`Quantity`/`Money` 的 `str()` 可能带币种后缀（如 "5.00000000 USDT"），
+    不能直接喂给 `Decimal()`，必须走它们的 `as_decimal()`。
+    """
+    if isinstance(value, Decimal):
+        return value
+    as_decimal = getattr(value, "as_decimal", None)
+    if callable(as_decimal):
+        return as_decimal()
+    return Decimal(str(value))
 
 
 def _quantize_down(value: Decimal, increment: Decimal) -> Decimal:
