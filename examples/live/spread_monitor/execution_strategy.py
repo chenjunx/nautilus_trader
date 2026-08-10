@@ -253,11 +253,19 @@ class ArbExecutionStrategy(Strategy):
     def _resume(self, base: str, state: ArbState) -> None:
         """重新武装等待用的计时器，绝不重发订单——真实成交/拒绝事件靠 exec engine
         reconciliation 重放，`on_order_filled`/`on_order_rejected` 会正常触发。
+
+        `TRANSFERRING` 下 dry-run 产生的是假状态（`withdrawal_chain == "DRYRUN"`，
+        Kraken 上根本没有对应的真实提现），去真实轮询永远匹配不上，只会空等到
+        withdrawal_timeout 才报错卡死——此时应该跟建仓时 `_start_withdrawal` 的
+        dry-run 分支一样直接判定到账。
         """
         if state.phase == Phase.BUILDING_PERP:
             self._arm_perp_timeout(base)
         elif state.phase == Phase.TRANSFERRING:
-            self._arm_withdrawal_polling(base)
+            if self._dry_run or state.withdrawal_chain == "DRYRUN":
+                self._on_deposit_confirmed(base)
+            else:
+                self._arm_withdrawal_polling(base)
 
     # -------------------------------------------------------------- 状态存取 --
 

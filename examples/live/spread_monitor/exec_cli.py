@@ -68,6 +68,9 @@ def main() -> None:
     parser.add_argument("--no-redis", action="store_true",
                         help="不使用 Redis，cache 纯内存，进程重启会丢失套利状态机"
                              "（可能导致重复建仓，仅限本地无 Redis 环境下调试用）")
+    parser.add_argument("--flush-redis", action="store_true",
+                        help="启动时清空 Redis 里的 cache（包括套利状态机），"
+                             "只能配合 --dry-run 使用，避免误清真实运行状态，仅限调试用")
     args = parser.parse_args()
 
     if args.no_redis:
@@ -81,6 +84,15 @@ def main() -> None:
             "[exec] 警告：--no-redis 已开启，cache 将是纯内存的，进程重启会丢失套利状态机、"
             "可能导致重复建仓，仅建议在 dry-run/调试时这样用",
         )
+
+    if args.flush_redis:
+        if not args.dry_run:
+            print(
+                "[exec] 错误：--no-dry-run 不能配合 --flush-redis 使用，"
+                "避免误清真实运行中的套利状态机",
+            )
+            return
+        print("[exec] 警告：--flush-redis 已开启，启动时会清空 Redis 里的 cache（含套利状态机），仅用于调试")
 
     # 验证主副所不能相同
     if args.main_venue.upper() == args.secondary_venue.upper():
@@ -125,7 +137,7 @@ def main() -> None:
                 password=args.redis_password,
                 ssl=args.redis_ssl,
             ),
-            flush_on_start=False,
+            flush_on_start=args.flush_redis,
         )
     )
 
