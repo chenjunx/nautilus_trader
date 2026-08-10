@@ -53,6 +53,27 @@ from spread_monitor.wallet import WALLET_REGISTRY
 IN_PROGRESS_BUILD_PHASES = (Phase.BUILDING_SPOT, Phase.BUILDING_PERP, Phase.TRANSFERRING)
 ACTIVE_BASE_PHASES = (*IN_PROGRESS_BUILD_PHASES, Phase.ACTIVE)
 
+# HACK(kraken-currency-code): nautilus_trader 的 Kraken 适配器
+# （crates/adapters/kraken/src/common/parse.rs::parse_spot_instrument）在构造
+# CurrencyPair 时，base_currency/quote_currency 直接用了 Kraken 内部的历史资产码
+# （如 "XXBT"/"XXDG"/"ZUSD"），没有像它自己拼 instrument_id 时那样做
+# XBT→BTC / XDG→DOGE 的归一化——导致 inst.base_currency 在 Kraken 上可能是
+# "XXDG" 而不是 "DOGE"，跟 BINANCE 等其它交易所的编码对不上，本模块按
+# base_currency 字符串做跨所匹配时会误判成"这个 base 在 KRAKEN 没有现货"。
+#
+# 这里只是临时在策略侧补一刀：剥掉 Kraken 遗留的 X/Z 类别前缀，再套用它自己的
+# 改名表。跟 Kraken 官方 Rust 代码里 normalize_currency_code() 的逻辑一致，
+# 不是本模块发明的新规则。已知局限：无法区分"历史前缀"和"真的以 X/Z 开头的现代
+# 币种代码"（Kraken 自己有 /0/public/Assets 接口能给出权威 altname 消除这个歧义，
+# 但这个适配器目前没调用它，Python 侧也没打算为此多发一次请求）。
+# 等 Kraken 适配器把 base_currency/quote_currency 也归一化后，这段可以整体删掉。
+_KRAKEN_LEGACY_RENAMES = {"XBT": "BTC", "XDG": "DOGE"}
+
+
+def _normalize_kraken_currency(code: str) -> str:
+    stripped = code[1:] if code[:1] in ("X", "Z") else code
+    return _KRAKEN_LEGACY_RENAMES.get(stripped, stripped)
+
 
 class ArbExecutionConfig(StrategyConfig, frozen=True):
     bases_csv: str
@@ -151,9 +172,13 @@ class ArbExecutionStrategy(Strategy):
                 quote = str(inst.quote_currency)
             except AttributeError:
                 continue
+            venue = str(inst.id.venue)
+            if venue == "KRAKEN":
+                # 见文件顶部 HACK(kraken-currency-code) 说明。
+                base = _normalize_kraken_currency(base)
+                quote = _normalize_kraken_currency(quote)
             if quote != "USDT":
                 continue
-            venue = str(inst.id.venue)
             if isinstance(inst, CurrencyPair) and venue in (main_spot, secondary_spot):
                 spot_by_base[base][venue] = inst
             elif isinstance(inst, CryptoPerpetual) and venue == main_perp:
