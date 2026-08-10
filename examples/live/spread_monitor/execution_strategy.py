@@ -437,7 +437,9 @@ class ArbExecutionStrategy(Strategy):
         )
 
     def _on_perp_build_filled(self, base: str, qty: Decimal, _price: Decimal) -> None:
-        self.clock.cancel_timer(f"exec:perp_timeout:{base}")
+        timer_name = f"exec:perp_timeout:{base}"
+        if timer_name in self.clock.timer_names:
+            self.clock.cancel_timer(timer_name)
         spot_qty = Decimal(self._states[base].spot_qty)
         self.log.info(f"[exec] {base} 永续对冲成交 perp_fill_qty={qty}（提现按现货成交量 spot_qty={spot_qty} 计算），开始转账一半现货到 {self._secondary_spot_venue}")
         self._advance_state(base, phase=Phase.TRANSFERRING, transfer_started_at_ts=time.time())
