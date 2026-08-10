@@ -436,10 +436,15 @@ class ArbExecutionStrategy(Strategy):
             override=True,
         )
 
+    def _cancel_timer_if_armed(self, name: str) -> None:
+        """dry-run 分支会跳过对应的 _arm_* 调用，撤销一个从未设置过的定时器名字会
+        触发 Condition.is_in 报错并杀掉整个策略，所以撤销前先判断是否存在。
+        """
+        if name in self.clock.timer_names:
+            self.clock.cancel_timer(name)
+
     def _on_perp_build_filled(self, base: str, qty: Decimal, _price: Decimal) -> None:
-        timer_name = f"exec:perp_timeout:{base}"
-        if timer_name in self.clock.timer_names:
-            self.clock.cancel_timer(timer_name)
+        self._cancel_timer_if_armed(f"exec:perp_timeout:{base}")
         spot_qty = Decimal(self._states[base].spot_qty)
         self.log.info(f"[exec] {base} 永续对冲成交 perp_fill_qty={qty}（提现按现货成交量 spot_qty={spot_qty} 计算），开始转账一半现货到 {self._secondary_spot_venue}")
         self._advance_state(base, phase=Phase.TRANSFERRING, transfer_started_at_ts=time.time())
@@ -482,7 +487,7 @@ class ArbExecutionStrategy(Strategy):
         state = self._states.get(base)
         if state is None or state.phase != Phase.BUILDING_PERP:
             return
-        self.clock.cancel_timer(f"exec:perp_timeout:{base}")
+        self._cancel_timer_if_armed(f"exec:perp_timeout:{base}")
 
         if state.perp_leg_attempt < 1:
             self.log.warning(f"[exec] {base} 永续腿被拒绝（{reason}），重试一次")
@@ -603,7 +608,7 @@ class ArbExecutionStrategy(Strategy):
     def _poll_deposit(self, base: str) -> None:
         state = self._states.get(base)
         if state is None or state.phase != Phase.TRANSFERRING:
-            self.clock.cancel_timer(f"exec:withdrawal_poll:{base}")
+            self._cancel_timer_if_armed(f"exec:withdrawal_poll:{base}")
             return
         self.run_in_executor(self._poll_deposit_blocking, args=(base,))
 
@@ -631,8 +636,8 @@ class ArbExecutionStrategy(Strategy):
             self._on_deposit_confirmed(base)
 
     def _on_deposit_confirmed(self, base: str) -> None:
-        self.clock.cancel_timer(f"exec:withdrawal_poll:{base}")
-        self.clock.cancel_timer(f"exec:withdrawal_timeout:{base}")
+        self._cancel_timer_if_armed(f"exec:withdrawal_poll:{base}")
+        self._cancel_timer_if_armed(f"exec:withdrawal_timeout:{base}")
         self.log.info(f"[exec] {base} {self._secondary_spot_venue} 到账确认，转入 ACTIVE")
         self._advance_state(base, phase=Phase.ACTIVE)
 
@@ -645,7 +650,7 @@ class ArbExecutionStrategy(Strategy):
             f"withdrawal_id={state.withdrawal_id}，资金可能仍在路上，只告警不自动重发提现，"
             "停止轮询，请人工确认后手动干预状态",
         )
-        self.clock.cancel_timer(f"exec:withdrawal_poll:{base}")
+        self._cancel_timer_if_armed(f"exec:withdrawal_poll:{base}")
 
     # ---------------------------------------------------------------- 套利 --
 
