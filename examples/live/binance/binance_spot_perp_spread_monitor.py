@@ -281,7 +281,7 @@ class SpotPerpSpreadMonitor(Strategy):
             if spot_mid is None or perp_mid is None or spot_mid == 0.0:
                 continue
             spread_pct = (perp_mid - spot_mid) / spot_mid * 100.0
-            rows.append((abs(spread_pct), spread_pct, base, spot_mid, perp_mid))
+            rows.append((spread_pct, base, spot_mid, perp_mid))
 
         if not rows:
             return
@@ -289,10 +289,10 @@ class SpotPerpSpreadMonitor(Strategy):
         rows.sort(reverse=True)
         ts = time.strftime("%H:%M:%S")
         print(
-            f"\n{ts} == TOP {self.config.top_n} BASIS (spot vs perp, abs) "
+            f"\n{ts} == TOP {self.config.top_n} BASIS (spot vs perp, high to low) "
             f"— tracking {len(rows)}/{len(self._pairings)} pairs ==",
         )
-        for _, spread_pct, base, spot_mid, perp_mid in rows[: self.config.top_n]:
+        for spread_pct, base, spot_mid, perp_mid in rows[: self.config.top_n]:
             print(
                 f"  {self._label(base):<20} "
                 f"spot={spot_mid:.6g}  perp={perp_mid:.6g}  "
