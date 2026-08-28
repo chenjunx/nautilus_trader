@@ -269,7 +269,7 @@ class SpotPerpSpreadMonitor(Strategy):
         print(
             f"{ts} {self._label(base):<20} "
             f"spot={spot_mid:.6g}  perp={perp_mid:.6g}  "
-            f"basis={spread_pct:+.4f}%  {self._funding_str(base)}",
+            f"basis={spread_pct * 100.0:+.2f}bp  {self._funding_str(base)}",
         )
         sys.stdout.flush()
 
@@ -288,12 +288,15 @@ class SpotPerpSpreadMonitor(Strategy):
 
         rows.sort(reverse=True)
         ts = time.strftime("%H:%M:%S")
-        print(f"\n{ts} == TOP {self.config.top_n} BASIS (spot vs perp, abs) ==")
+        print(
+            f"\n{ts} == TOP {self.config.top_n} BASIS (spot vs perp, abs) "
+            f"— tracking {len(rows)}/{len(self._pairings)} pairs ==",
+        )
         for _, spread_pct, base, spot_mid, perp_mid in rows[: self.config.top_n]:
             print(
                 f"  {self._label(base):<20} "
                 f"spot={spot_mid:.6g}  perp={perp_mid:.6g}  "
-                f"basis={spread_pct:+.4f}%  {self._funding_str(base)}",
+                f"basis={spread_pct * 100.0:+.2f}bp  {self._funding_str(base)}",
             )
         print()
         sys.stdout.flush()
