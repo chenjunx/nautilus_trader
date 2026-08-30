@@ -25,7 +25,9 @@ Handles Binance's scaled-contract naming (e.g. perp base asset "1000SHIB" vs spo
 asset "SHIB") by normalizing the perpetual price back to a per-token basis before
 computing the spread.
 
-Data-only monitor — no execution client, cannot submit orders.
+Data-only monitor — no execution client, cannot submit orders. Every QuoteTick received in
+``on_quote_tick`` (spot and perp) is also streamed to the ``catalog/`` feather catalog, one
+file per instrument, see ``StreamingConfig`` below.
 
 """
 
@@ -52,6 +54,7 @@ from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.instruments import CurrencyPair
+from nautilus_trader.persistence.config import StreamingConfig
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -213,6 +216,7 @@ class SpotPerpSpreadMonitor(Strategy):
         if spot_mid is None or perp_mid is None or spot_mid == 0.0:
             return
 
+        spread_pct = (perp_mid - spot_mid) / spot_mid * 100.0
         now = time.monotonic()
 
         if now - self._last_summary >= self.config.summary_interval_secs:
@@ -222,7 +226,6 @@ class SpotPerpSpreadMonitor(Strategy):
         if now - self._last_print.get(base, 0.0) < self.config.throttle_secs:
             return
 
-        spread_pct = (perp_mid - spot_mid) / spot_mid * 100.0
         if abs(spread_pct) < self.config.min_abs_spread_pct:
             return
 
@@ -326,6 +329,12 @@ config_node = TradingNodeConfig(
     timeout_connection=30.0,
     timeout_disconnection=10.0,
     timeout_post_stop=5.0,
+    # Streams every QuoteTick received (spot and perp) to feather files, one per instrument_id,
+    # under catalog/live/{instance_id}/quote_tick/.
+    streaming=StreamingConfig(
+        catalog_path="catalog",
+        include_types=[QuoteTick],
+    ),
 )
 
 # Instantiate the node with a configuration.
