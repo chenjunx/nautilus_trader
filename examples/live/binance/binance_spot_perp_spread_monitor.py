@@ -55,6 +55,7 @@ from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.persistence.config import StreamingConfig
+from nautilus_trader.persistence.writer import RotationMode
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -330,10 +331,12 @@ config_node = TradingNodeConfig(
     timeout_disconnection=10.0,
     timeout_post_stop=5.0,
     # Streams every QuoteTick received (spot and perp) to feather files, one per instrument_id,
-    # under catalog/live/{instance_id}/quote_tick/.
+    # under catalog/live/{instance_id}/quote_tick/. Rotates to a new file at UTC midnight so
+    # a single file doesn't grow unbounded across a long-running process.
     streaming=StreamingConfig(
         catalog_path="catalog",
         include_types=[QuoteTick],
+        rotation_mode=RotationMode.SCHEDULED_DATES,
     ),
 )
 
